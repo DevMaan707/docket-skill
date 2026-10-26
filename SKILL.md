@@ -31,9 +31,10 @@ or creating work items:
    of leaving it open.
 3. **Assume the earlier session may be stale, including the one that did the setup.** Its
    briefs, plans, summaries and task lists describe the repo *as it was*. Verify each claim
-   against the current code and git log before relying on it. A LIVE marker may belong to a
-   session that died; if its last event is old and nothing moved since, treat it as stale and
-   say so to the user rather than waiting forever.
+   against the current code and git log before relying on it. Sessions whose Claude process
+   exited are ended automatically on the next write (same machine, macOS/Linux). Elsewhere, a
+   LIVE marker can outlast a crash by up to 30 minutes: if its last activity is old and nothing
+   moved since, treat it as stale and tell the user rather than waiting.
 4. **Rearrange what's wrong.** When the record no longer matches reality, fix it: supersede
    stale facts (`--supersedes`), re-parent, retype or rename items (`work move|type|rename`),
    drop obsolete tasks with a reason, and log a fresh `brief` that states the verified state.

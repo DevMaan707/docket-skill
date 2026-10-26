@@ -34,6 +34,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -99,13 +100,14 @@ class Lock:
     """Cross-platform lock file; several CLIs and agents write at once."""
 
     def __init__(self, path):
-        self.path, self.fd = path, None
+        self.path, self.fd, self.held = path, None, False
 
     def __enter__(self):
         start = now()
         while True:
             try:
                 self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                self.held = True
                 return self
             except FileExistsError:
                 try:
@@ -114,8 +116,8 @@ class Lock:
                         continue
                 except OSError:
                     pass
-                if now() - start > 5:  # ponytail: proceeds unlocked; load_state catches the drift, but two
-                    return self  # unlocked `work new` at once could still pick the same W-id
+                if now() - start > 5:
+                    return self  # never block Claude Code; callers check .held where it matters
                 time.sleep(0.02)
 
     def __exit__(self, *exc):
@@ -125,6 +127,43 @@ class Lock:
                 os.remove(self.path)
             except OSError:
                 pass
+
+
+def claude_pid():
+    """PID of the Claude Code process behind this hook (POSIX; None if unknown)."""
+    if os.name == "nt":
+        return None
+    env = os.environ.get("CLAUDE_PID", "")
+    if env.isdigit():
+        return int(env)
+    pid = os.getppid()
+    for _ in range(3):  # skip the shell / python wrappers between Claude and us
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True,
+                                 text=True, timeout=2).stdout.split(None, 1)
+        except Exception:
+            return None
+        if len(out) < 2:
+            return None
+        name = os.path.basename(out[1].strip()).lstrip("-")
+        if name not in ("sh", "bash", "zsh", "dash", "fish") and not name.startswith("python"):
+            return pid
+        pid = int(out[0])
+    return None
+
+
+def process_gone(s):
+    """True only when we can tell the session's Claude process has exited (same host, POSIX)."""
+    pid = s.get("pid")
+    if not pid or os.name == "nt" or s.get("host") != socket.gethostname():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:  # EPERM: alive, owned by someone else
+        return False
+    return False
 
 
 def find_root(start=None):
@@ -288,7 +327,7 @@ def _pid(prefix, *parts):
 
 
 def is_live(s):
-    return bool(s) and s["status"] != "ended" and now() - s["last"] < LIVE_SECS
+    return bool(s) and s["status"] != "ended" and now() - s["last"] < LIVE_SECS and not process_gone(s)
 
 
 def pending_items(st, wid):
@@ -383,6 +422,8 @@ def apply(st, ev):
     title, body = ev.get("title", ""), ev.get("body", "")
     wid = ev.get("wid") or s.get("work")
 
+    if ev.get("pid"):
+        s["pid"], s["host"] = ev["pid"], ev.get("host")
     if kind == "session_start":
         s["status"] = "idle"
         if ev.get("name") and not s["name"]:
@@ -563,19 +604,22 @@ def emit(root, **ev):
     ev.setdefault("ts", now())
     ev.setdefault("id", uuid.uuid4().hex[:10])
     ev.setdefault("agent", "main")
-    with Lock(os.path.join(bdir(root), ".lock")):
+    with Lock(os.path.join(bdir(root), ".lock")) as lock:
         st = load_state(root)
         if ev.get("wid") == "__new__":
+            if not lock.held:  # an unlocked writer could hand out the same W-id twice
+                sys.exit("docket is busy (another writer holds the lock); retry the command.")
             ev["wid"] = "W-%04d" % (len(st["work"]) + 1)
-        line = (json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8")
-        with open(os.path.join(bdir(root), "events.jsonl"), "ab") as f:
-            f.write(line)
-        st["offset"] = st.get("offset", 0) + len(line)
-        apply(st, ev)
+        gone = [x for x in st["sessions"].values()
+                if x["status"] != "ended" and x["id"] != ev["sid"] and process_gone(x)]
+        for x in gone:  # crashed or killed without SessionEnd: record it so every reader agrees
+            _append(root, st, dict(ts=ev["ts"], id=uuid.uuid4().hex[:10], agent="main", sid=x["id"],
+                                   kind="session_end", title="Session ended (process exited)"))
+        _append(root, st, ev)
         s = st["sessions"].get(ev["sid"], {})
         wid = ev.get("wid") or s.get("work")
-        if ev["kind"] in ("work_new", "work_move", "work_type", "work_rename", "work_status",
-                          "session_start"):  # also re-check trust against the repo on start
+        if gone or ev["kind"] in ("work_new", "work_move", "work_type", "work_rename", "work_status",
+                                  "session_start"):  # also re-check trust against the repo on start
             write_index(root, st, list(st["work"]))  # structure changed: redo every page
         elif wid and wid in st["work"] and ev["kind"] != "turn_end":
             write_index(root, st, [wid] + ancestors(st, wid))
@@ -583,12 +627,20 @@ def emit(root, **ev):
     return ev, st
 
 
+def _append(root, st, ev):
+    line = (json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8")
+    with open(os.path.join(bdir(root), "events.jsonl"), "ab") as f:
+        f.write(line)
+    st["offset"] = st.get("offset", 0) + len(line)
+    apply(st, ev)
+
+
 # --------------------------------------------------------- work index & trust
 def live_sessions(st, wid, exclude=None):
     out = []
     for x in st["work"].get(wid, {}).get("sessions", []):
         s = st["sessions"].get(x["sid"])
-        if s and s["id"] != exclude and s["status"] != "ended" and now() - s["last"] < LIVE_SECS:
+        if s and s["id"] != exclude and is_live(s):
             out.append(s)
     return out
 
@@ -1012,12 +1064,13 @@ def handle_hook(inp):
             except OSError:
                 pass
         emit(root, kind="session_start", title="Session " + inp.get("source", "start"),
-             name=os.environ.get("DOCKET_NAME", ""), **E)
+             name=os.environ.get("DOCKET_NAME", ""), pid=claude_pid(), host=socket.gethostname(), **E)
         hook_output(event, context_for(root, sid, "main"))
 
     elif event == "UserPromptSubmit":
         prompt = inp.get("prompt") or ""
-        _, st = emit(root, kind="prompt", title=clip(prompt, 120), body=clip(prompt, 600), **E)
+        _, st = emit(root, kind="prompt", title=clip(prompt, 120), body=clip(prompt, 600),
+                     pid=claude_pid(), host=socket.gethostname(), **E)
         if len(prompt.split()) >= 3:
             hook_output(event, prior_work_block(root, st, sid, prompt))
 

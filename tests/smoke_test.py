@@ -21,9 +21,10 @@ DOCKET = os.path.join(HERE, "..", "scripts", "docket.py")
 FAILS = []
 
 
-def run(args, cwd, session=None, stdin=None):
+def run(args, cwd, session=None, stdin=None, pid=None):
     env = dict(os.environ)
     env.pop("DOCKET_ROOT", None)
+    env["CLAUDE_PID"] = str(pid or os.getpid())  # sessions "run" in this live test process
     if session:
         env["DOCKET_SESSION"] = session
     p = subprocess.run([sys.executable, DOCKET] + args, cwd=cwd, env=env, input=stdin,
@@ -31,9 +32,9 @@ def run(args, cwd, session=None, stdin=None):
     return p.returncode, p.stdout + p.stderr
 
 
-def hook(cwd, event, sid, **extra):
+def hook(cwd, event, sid, pid=None, **extra):
     payload = dict(hook_event_name=event, session_id=sid, cwd=cwd, **extra)
-    code, out = run(["hook"], cwd, stdin=json.dumps(payload))
+    code, out = run(["hook"], cwd, stdin=json.dumps(payload), pid=pid)
     assert code == 0, "hook must always exit 0: %s" % out
     return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.strip().startswith("{") else ""
 
@@ -152,6 +153,20 @@ def main():
             hook(real, "PostToolUse", "sB", tool_name="Edit", tool_input={"file_path": os.path.join(d, "src", "auth.py")})
             check("symlinked path spelling still tracks the edit",
                   "src/auth.py" in open(os.path.join(d, ".docket", "work", "W-0001.md"), encoding="utf-8").read())
+
+        if os.name != "nt":  # a session whose Claude process died without SessionEnd
+            dead = subprocess.Popen([sys.executable, "-c", "pass"]); dead.wait()
+            hook(d, "SessionStart", "sF", pid=dead.pid, source="startup")
+            run(["work", "attach", "W-0001"], d, "sF")
+            code, out = run(["work", "attach", "W-0001"], d, "sB")
+            st = json.load(open(os.path.join(d, ".docket", "state.json"), encoding="utf-8"))
+            check("crashed session is ended on the next write", st["sessions"]["sF"]["status"] == "ended"
+                  and "sF" not in out, out)
+        lock = os.path.join(d, ".docket", ".lock")
+        open(lock, "w").close()
+        code, out = run(["work", "new", "Busy lock item", "-k", "busy", "--top-level"], d, "sB")
+        os.remove(lock)
+        check("work new refuses to pick an id without the lock", code != 0 and "busy" in out, out)
 
         before = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
         run(["rebuild"], d)
