@@ -18,6 +18,34 @@ The hooks inject the exact command with `--session` and `--agent` filled in. Use
 you. Hooks already capture prompts, task lists, plan-mode plans, edited files, and subagent
 start, stop and output.
 
+## 0. Session start and setup: read before you write
+
+Never assume the docket is empty or that you are the first session. Before setting anything up
+or creating work items:
+
+1. **Read what's there.** `$B work list`, then `$B show` and `$B check` every open item that
+   touches your request. If `./.docket` already exists, never re-init or overwrite it; build on it.
+2. **Decide: continue, or not?** For each open item, ask whether it is still wanted, still
+   correct, and whether your request is a continuation of it. Continue it if so. If it is
+   finished, abandoned or replaced, mark it (`work status … done|abandoned|superseded`) instead
+   of leaving it open.
+3. **Assume the earlier session may be stale, including the one that did the setup.** Its
+   briefs, plans, summaries and task lists describe the repo *as it was*. Verify each claim
+   against the current code and git log before relying on it. A LIVE marker may belong to a
+   session that died; if its last event is old and nothing moved since, treat it as stale and
+   say so to the user rather than waiting forever.
+4. **Rearrange what's wrong.** When the record no longer matches reality, fix it: supersede
+   stale facts (`--supersedes`), re-parent, retype or rename items (`work move|type|rename`),
+   drop obsolete tasks with a reason, and log a fresh `brief` that states the verified state.
+   Don't delete history; correct on top of it.
+
+## Critique and reason, always
+
+Don't accept anything on the docket, or your own plan, at face value. Before each decision ask:
+what evidence supports this, what would make it wrong, and what alternative did I reject and why?
+Put the answer in the `decision` body and `--rejected`. When a claim and the code disagree, the
+code wins and the record gets corrected.
+
 ## 1. Before starting a task: reuse, don't fork
 
 When you get a task, the prompt hook searches the index and injects either
@@ -83,6 +111,16 @@ Tell the user in one line which items you adopted, resolved or dropped. Items ma
 | `note` | anything else | |
 
 Name the session once: `$B name "<2-5 words>"`. Mark finished work: `$B work status W-xxxx done`.
+
+### Update after every big change, but check first
+
+After each significant change (a step of the plan lands, a design changes, a bug is found or
+fixed, scope shifts), update the docket: a `brief`, plus `fact`/`decision` entries as needed.
+**Before writing, re-read**: `$B show W-xxxx` and `$B pending W-xxxx`. Another session or
+subagent may already have logged the same thing, resolved a task you were about to resolve, or
+changed direction. If it's already recorded, don't duplicate it; if it conflicts with what you
+found, verify against the code and supersede whichever is wrong. Check the task list every time
+too: adopt, resolve or drop anything that changed underneath you.
 
 ## 3. Trust rules (against context poisoning)
 
