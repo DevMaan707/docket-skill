@@ -96,7 +96,9 @@ Don't ignore them. For each **open** item, check the code and decide:
   session knows why it wasn't done.
 
 Tell the user in one line which items you adopted, resolved or dropped. Items marked
-`active` belong to a live session; leave them alone.
+`active` belong to a live session; leave them alone. A task adopted by a session that has since ended or
+gone quiet for 30 minutes shows as `open` again, with the reason; re-check it like any other. A
+brief without `--next` doesn't clear earlier next items; resolve or drop them explicitly.
 
 ## 2. While working: write the record
 
@@ -121,6 +123,8 @@ subagent may already have logged the same thing, resolved a task you were about 
 changed direction. If it's already recorded, don't duplicate it; if it conflicts with what you
 found, verify against the code and supersede whichever is wrong. Check the task list every time
 too: adopt, resolve or drop anything that changed underneath you.
+`log` helps: it prints a `NOTE:` listing entries other sessions wrote on the item since your last
+one. Read them before continuing; never ignore that note.
 
 ## 3. Trust rules (against context poisoning)
 

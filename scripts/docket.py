@@ -114,8 +114,8 @@ class Lock:
                         continue
                 except OSError:
                     pass
-                if now() - start > 5:
-                    return self  # never block Claude Code
+                if now() - start > 5:  # ponytail: proceeds unlocked; load_state catches the drift, but two
+                    return self  # unlocked `work new` at once could still pick the same W-id
                 time.sleep(0.02)
 
     def __exit__(self, *exc):
@@ -130,14 +130,14 @@ class Lock:
 def find_root(start=None):
     env = os.environ.get("DOCKET_ROOT")
     if env and os.path.isdir(env):
-        return env
-    d = os.path.abspath(start or os.getcwd())
+        return os.path.realpath(env)
+    d = os.path.realpath(start or os.getcwd())
     while True:
         if os.path.isdir(os.path.join(d, DIRNAME)):
             return d
         parent = os.path.dirname(d)
         if parent == d:
-            return os.path.abspath(start or os.getcwd())
+            return os.path.realpath(start or os.getcwd())
         d = parent
 
 
@@ -165,8 +165,8 @@ def ensure_board(root):
 def rel(root, path):
     if not path:
         return None
-    p = os.path.abspath(os.path.join(root, path))
-    if not p.startswith(os.path.abspath(root) + os.sep):
+    p = os.path.realpath(os.path.join(root, path))
+    if not p.startswith(os.path.realpath(root) + os.sep):
         return None
     r = os.path.relpath(p, root).replace(os.sep, "/")
     return None if r.startswith(DIRNAME) else r
@@ -310,9 +310,10 @@ def pending_items(st, wid):
                 raw.append({"pid": _pid("T", s["id"], str(t["id"])), "subject": t["subject"],
                             "source": "task", "sid": s["id"], "agent": t.get("agent", "main"),
                             "live": is_live(s), "ts": t.get("ts") or s["last"]})
-    briefs = [e for _, e in all_entries(st, wid) if e["kind"] == "brief"]
-    if briefs and briefs[-1].get("next"):
-        b = briefs[-1]
+    briefs = [e for _, e in all_entries(st, wid) if e["kind"] == "brief" and e.get("next")
+              and not e.get("supersededBy")]
+    if briefs:  # newest brief that lists next steps; a later brief without --next doesn't erase them
+        b = max(briefs, key=lambda e: e["ts"])
         for part in [p.strip(" -*") for p in re.split(r"[;\n]+", b["next"]) if p.strip(" -*")]:
             raw.append({"pid": _pid("N", b["id"], part), "subject": part, "source": "brief next",
                         "sid": b["sid"], "agent": b["agent"],
@@ -341,8 +342,11 @@ def pending_items(st, wid):
         elif any(c["live"] for c in [it] + it["copies"]):
             holder = next(c for c in [it] + it["copies"] if c["live"])
             it.update(status="active", by=holder["sid"], reason="")
-        elif ov and ov["status"] == "adopted":
+        elif ov and ov["status"] == "adopted" and is_live(st["sessions"].get(ov["by"])):
             it.update(status="adopted", by=ov["by"], reason="")
+        elif ov and ov["status"] == "adopted":  # adopter died or ended without finishing it
+            it.update(status="open", by=None, reason="adopted by %s, which is no longer live"
+                      % (st["sessions"].get(ov["by"], {}).get("name") or ov["by"][:8]))
         else:
             it.update(status="open", by=None, reason="")
         out.append(it)
@@ -365,10 +369,10 @@ def all_entries(st, wid=None):
 
 
 def find_entry(st, eid):
-    for s, e in all_entries(st):
-        if e["id"] == eid or e["id"].startswith(eid):
-            return e
-    return None
+    """Exact id, or a prefix that matches exactly one entry."""
+    hits = [e for _, e in all_entries(st) if eid and e["id"].startswith(eid)]
+    exact = [e for e in hits if e["id"] == eid]
+    return exact[0] if exact else hits[0] if len(hits) == 1 else None
 
 
 def apply(st, ev):
@@ -515,11 +519,16 @@ def apply(st, ev):
 
 
 def load_state(root):
+    """state.json, or a rebuild when it doesn't cover every byte of events.jsonl
+    (a writer that timed out on the lock, a crash between append and save)."""
     try:
         with open(os.path.join(bdir(root), "state.json"), encoding="utf-8") as f:
-            return json.load(f)
+            st = json.load(f)
+        if st.get("offset") == os.path.getsize(os.path.join(bdir(root), "events.jsonl")):
+            return st
     except (OSError, ValueError):
-        return rebuild(root, write=False)
+        pass
+    return rebuild(root, write=False)
 
 
 def save_state(root, st):
@@ -536,6 +545,7 @@ def rebuild(root, write=True):
     st = empty_state(root)
     p = os.path.join(bdir(root), "events.jsonl")
     if os.path.exists(p):
+        st["offset"] = os.path.getsize(p)
         with open(p, encoding="utf-8") as f:
             for line in f:
                 try:
@@ -557,8 +567,10 @@ def emit(root, **ev):
         st = load_state(root)
         if ev.get("wid") == "__new__":
             ev["wid"] = "W-%04d" % (len(st["work"]) + 1)
-        with open(os.path.join(bdir(root), "events.jsonl"), "a", encoding="utf-8") as f:
-            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        line = (json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8")
+        with open(os.path.join(bdir(root), "events.jsonl"), "ab") as f:
+            f.write(line)
+        st["offset"] = st.get("offset", 0) + len(line)
         apply(st, ev)
         s = st["sessions"].get(ev["sid"], {})
         wid = ev.get("wid") or s.get("work")
@@ -643,7 +655,8 @@ def render_page(root, st, wid):
     A("- **Type:** %s" % w.get("type", "feature"))
     live = live_sessions(st, wid)
     A("- **Status:** %s · updated %s%s" % (w["status"], ago(w["updated"]),
-      " · **LIVE in: %s**" % ", ".join(x["name"] or x["id"][:8] for x in live) if live else ""))
+      " · **LIVE in: %s**" % ", ".join("%s (last activity %s)" % (x["name"] or x["id"][:8], ago(x["last"]))
+                                       for x in live) if live else ""))
     if w.get("keywords"):
         A("- **Keywords:** " + ", ".join(w["keywords"]))
     A("- **Sessions:** " + "; ".join("%s (%s, %s)" % (sname(st, x["sid"]), x["role"], ago(x["ts"]))
@@ -1086,7 +1099,7 @@ def _pending(root, op, sid, typ, desc="", prompt=""):
 
 # ------------------------------------------------------------------------ CLI
 def latest_session(st):
-    live = [s for s in st["sessions"].values() if s["status"] != "ended"]
+    live = [s for s in st["sessions"].values() if is_live(s)]
     return max(live, key=lambda s: s["last"])["id"] if live else None
 
 
@@ -1339,6 +1352,11 @@ def main():
             wid = resolve_wid(st, a.wid) or sys.exit("No such work item: %s" % a.wid)
             emit(root, sid=sid, kind="work_status", wid=wid, title=a.status)
             print("%s is now %s" % (wid, a.status))
+            left = [i for i in pending_items(st, wid) if i["status"] in ("open", "adopted", "active")]
+            if a.status == "done" and left:
+                print("WARNING: %d pending tasks still open; resolve or drop them:" % len(left))
+                for i in left:
+                    print("  %s  %s  (%s)" % (i["pid"], i["subject"], i["status"]))
         return 0
 
     # log
@@ -1363,12 +1381,23 @@ def main():
         for k in ("now", "done", "next", "blocked"):
             if getattr(a, k):
                 ev[k] = clip(getattr(a, k), 600)
-    if a.supersedes:
-        if not find_entry(st, a.supersedes):
-            sys.exit("No entry with id %s" % a.supersedes)
-        ev["supersedes"] = a.supersedes
+    if a.supersedes is not None:
+        old = find_entry(st, a.supersedes)
+        if not old:
+            sys.exit("No entry with id %s (or the prefix matches several; give more of it)" % a.supersedes)
+        ev["supersedes"] = old["id"]  # full id: a short prefix can become ambiguous later
     if a.kind == "task":
         ev.update(taskId=a.task_id or uuid.uuid4().hex[:4], subject=a.title, status=a.status)
+    target = wid or st["sessions"].get(sid, {}).get("work")
+    if target in st["work"]:
+        mine = [e["ts"] for _, e in all_entries(st, target) if e["sid"] == sid]
+        since = max(mine + [x["ts"] for x in st["work"][target]["sessions"] if x["sid"] == sid] or [0])
+        others = [e for _, e in all_entries(st, target) if e["sid"] != sid and e["ts"] > since]
+        if others:
+            print("NOTE: %d entries on %s by other sessions since you last wrote. Make sure this "
+                  "isn't a duplicate or a conflict (show %s):" % (len(others), target, target))
+            for e in sorted(others, key=lambda e: e["ts"])[-5:]:
+                print("  %s %s: %s  (%s)" % (e["id"], e["kind"], clip(e["title"], 80), prov(st, e)))
     ev, st = emit(root, **ev)
     s = st["sessions"][sid]
     extra = "" if s.get("work") or wid else "  (not attached to a work item; run `work new` or `work attach`)"

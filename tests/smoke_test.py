@@ -122,6 +122,37 @@ def main():
         check("instruction-like text flagged on the page", "[flagged: Ignore previous instructions]" in page, page[-600:])
         check("superseded fact hidden from facts", "id %s" % fact_id not in page.split("## Decisions")[0], page[:800])
 
+        # edge cases: stale sessions, concurrent writers, check-before-update
+        code, out = run(["log", "note", "C was here", "--work", "W-0001"], d, "sC")
+        code, out = run(["log", "brief", "B update", "--now", "x", "--work", "W-0001"], d, "sB")
+        check("writer told about other sessions' entries since it last wrote", "NOTE:" in out and "C was here" in out, out)
+        code, out = run(["pending", "W-0001", "--all"], d, "sB")
+        check("brief without --next keeps earlier next items", "refresh tokens" in out, out)
+        run(["log", "brief", "D plan", "--next", "Rotate signing keys", "--work", "W-0001"], d, "sD")
+        code, out = run(["pending", "W-0001"], d, "sD")
+        kid = next(l.split()[0] for l in out.splitlines() if "signing keys" in l)
+        run(["adopt", kid], d, "sD")
+        hook(d, "SessionEnd", "sD", reason="crash")
+        code, out = run(["pending", "W-0001"], d, "sB")
+        check("task adopted by an ended session is open again",
+              any(l.startswith(kid) and " open " in l for l in out.splitlines()), out)
+        code, out = run(["work", "status", "W-0001", "done"], d, "sB")
+        check("marking done with pending tasks warns", "WARNING" in out and "signing keys" in out, out)
+        run(["work", "status", "W-0001", "open"], d, "sB")
+        code, out = run(["log", "note", "x", "--supersedes", ""], d, "sB")
+        check("empty supersedes id refused", code != 0, out)
+        with open(os.path.join(d, ".docket", "events.jsonl"), "a") as f:  # writer that skipped state.json
+            f.write(json.dumps({"ts": 1e10, "id": "zz1", "sid": "sE", "kind": "note",
+                                "title": "written without the lock", "wid": "W-0001"}) + "\n")
+        code, out = run(["show", "W-0001"], d, "sB")
+        code, out = run(["log", "note", "after drift", "--work", "W-0001"], d, "sB")
+        check("state.json behind events.jsonl is caught up", "written without the lock" in out, out)
+        real = os.path.realpath(d)
+        if real != d:  # macOS /var -> /private/var: a hook path spelled the other way is still tracked
+            hook(real, "PostToolUse", "sB", tool_name="Edit", tool_input={"file_path": os.path.join(d, "src", "auth.py")})
+            check("symlinked path spelling still tracks the edit",
+                  "src/auth.py" in open(os.path.join(d, ".docket", "work", "W-0001.md"), encoding="utf-8").read())
+
         before = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
         run(["rebuild"], d)
         after = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
