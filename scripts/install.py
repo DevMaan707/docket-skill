@@ -20,7 +20,7 @@ OLD_MARKS = ("board.py\" hook",)  # installs from before the rename (agent-board
 EVENTS = [
     ("SessionStart", None),
     ("UserPromptSubmit", None),
-    ("PreToolUse", "Agent|Task"),
+    ("PreToolUse", "Agent|Task|Edit|Write|MultiEdit|NotebookEdit"),  # edits: lease check
     ("PostToolUse", "TodoWrite|TaskCreate|TaskUpdate|ExitPlanMode|Edit|Write|MultiEdit|NotebookEdit"),
     ("SubagentStart", None),
     ("SubagentStop", None),

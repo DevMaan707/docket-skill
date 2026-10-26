@@ -39,6 +39,14 @@ def hook(cwd, event, sid, pid=None, **extra):
     return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.strip().startswith("{") else ""
 
 
+def pre_edit(cwd, sid, path, **extra):
+    """PreToolUse for an Edit; returns the hookSpecificOutput ({} when allowed silently)."""
+    payload = dict(hook_event_name="PreToolUse", session_id=sid, cwd=cwd, tool_name="Edit",
+                   tool_input={"file_path": path}, **extra)
+    _, out = run(["hook"], cwd, stdin=json.dumps(payload))
+    return json.loads(out)["hookSpecificOutput"] if out.strip().startswith("{") else {}
+
+
 def check(name, cond, detail=""):
     print(("ok    " if cond else "FAIL  ") + name)
     if not cond:
@@ -162,7 +170,62 @@ def main():
             st = json.load(open(os.path.join(d, ".docket", "state.json"), encoding="utf-8"))
             check("crashed session is ended on the next write", st["sessions"]["sF"]["status"] == "ended"
                   and "sF" not in out, out)
+        # collisions: file leases (PreToolUse), compare-and-swap writes, conditional create
+        auth = os.path.join(d, "src", "auth.py")
+        hook(d, "SessionStart", "sG", source="startup")
+        hook(d, "PostToolUse", "sB", tool_name="Edit", tool_input={"file_path": auth})
+        out = pre_edit(d, "sG", auth)
+        check("edit of a file another live session holds is denied",
+              out.get("permissionDecision") == "deny" and "sB" in out.get("permissionDecisionReason", ""), str(out))
+        check("holder itself may keep editing", pre_edit(d, "sB", auth) == {})
+        check("a session's own subagent may edit what its main agent edited",
+              pre_edit(d, "sB", auth, agent_id="abc123", agent_type="general-purpose") == {})
+        out = pre_edit(d, "sB", auth)
+        check("main is blocked while its own running subagent holds the file",
+              out.get("permissionDecision") == "deny", str(out))
+        hook(d, "SubagentStop", "sB", agent_id="abc123", agent_type="general-purpose")
+        check("a stopped subagent's leases are released", pre_edit(d, "sB", auth) == {})
+        code, out = run(["claim", "src/auth.py"], d, "sG")
+        check("claiming a held file is refused", code == 3 and "held:" in out, out)
+        code, out = run(["claim", "src/", "--steal"], d, "sG")
+        check("steal needs a reason", code != 0, out)
+        code, out = run(["claim", "src/", "--steal", "--reason", "sB is stuck"], d, "sG")
+        check("steal with a reason takes the dir over", code == 0 and "taking over" in out, out)
+        out = pre_edit(d, "sB", auth)
+        check("after a dir claim, the old holder is denied inside it", out.get("permissionDecision") == "deny", str(out))
+        code, out = run(["leases"], d, "sB")
+        check("leases lists the holder", "src/" in out and "claimed" in out, out)
+        run(["release"], d, "sG")
+        check("released files are free again", pre_edit(d, "sB", auth) == {})
+        hook(d, "SessionEnd", "sB", reason="exit")
+        check("an ended session's leases are gone", pre_edit(d, "sG", auth) == {})
+        hook(d, "SessionStart", "sB", source="resume")
+
+        code, out = run(["show", "W-0001"], d, "sB")
+        rev = out.split("**Rev:** `")[1].split("`")[0]
+        run(["log", "note", "own note", "--work", "W-0001"], d, "sB")
+        code, out = run(["log", "brief", "mine", "--now", "x", "--work", "W-0001", "--expect", rev], d, "sB")
+        check("own writes since the read don't conflict", code == 0, out)
+        rev = out.split("rev ")[1].split(")")[0]
+        run(["log", "decision", "other session decided", "--work", "W-0001"], d, "sG")
+        code, out = run(["log", "brief", "stale", "--now", "y", "--work", "W-0001", "--expect", rev], d, "sB")
+        check("write based on a stale read is refused with what changed",
+              code == 3 and "CONFLICT" in out and "other session decided" in out, out)
+        code, out = run(["work", "status", "W-0001", "done", "--expect", "nonsense"], d, "sB")
+        check("unknown rev is refused", code == 3, out)
+        code, out = run(["work", "new", "Auth: move sessions to JWT", "--top-level"], d, "sG")
+        check("duplicate open title refused under the lock", code == 3 and "W-0001" in out, out)
+
         lock = os.path.join(d, ".docket", ".lock")
+        dead = subprocess.Popen([sys.executable, "-c", "pass"]); dead.wait()
+        with open(lock, "w") as f:
+            f.write("%d %s token" % (dead.pid, __import__("socket").gethostname()))
+        code, out = run(["log", "note", "after dead lock", "--work", "W-0001"], d, "sB")
+        check("a dead writer's lock is freed at once", code == 0 and not os.path.exists(lock), out)
+        open(lock, "w").close()
+        os.utime(lock, (0, 0))  # an ownerless lock from long ago (older docket, or crashed mid-write)
+        code, out = run(["log", "note", "after ownerless lock", "--work", "W-0001"], d, "sB")
+        check("an old ownerless lock is freed", not os.path.exists(lock), out)
         open(lock, "w").close()
         code, out = run(["work", "new", "Busy lock item", "-k", "busy", "--top-level"], d, "sB")
         os.remove(lock)

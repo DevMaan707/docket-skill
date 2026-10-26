@@ -66,6 +66,25 @@ docket.py work list                          # the whole index, by area and by t
 Each work item gets a Markdown page in `.docket/work/`, plus a line in `.docket/work/INDEX.md`.
 Agents can read these directly.
 
+## Agents never collide
+
+Parallel sessions and subagents collide in two places, the same file and the same record. Both
+writes are conditional and decided under one lock, the way GitLoom serializes per namespace and
+uses compare-and-swap as the backstop:
+
+- **File leases.** An agent's first edit of a file takes a lease on it, checked by a `PreToolUse`
+  hook *before* the edit runs. Another live agent's edit is denied with who holds it and why.
+  `docket.py claim src/auth/` reserves an area up front; `--steal --reason` takes one over and
+  logs it. Leases end when the holder's session or subagent stops, or its process dies.
+- **Compare-and-swap on the record.** Each work item has a rev. `log … --expect <rev>` is refused
+  with exit code 3 and a list of what changed if another session wrote since that read.
+- **Conditional create.** New work-item ids and titles are allocated under the lock, so two
+  agents can't create the same item.
+- **Lock ownership.** The lock records its owner; a dead owner's lock is freed at once, and no
+  one removes a lock they don't hold.
+
+`DOCKET_LEASES=warn` turns denials into warnings; `off` disables leases.
+
 ## Safeguards against context poisoning
 
 A wrong fact in shared memory gets repeated by every session that reads it, and each step that
