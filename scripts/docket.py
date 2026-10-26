@@ -647,8 +647,9 @@ def apply(st, ev):
         if kind == "blocker":
             e["resolved"] = False
         s["entries"].append(e)
-        if ev.get("supersedes"):
-            old = find_entry(st, ev["supersedes"])
+        sup = ev.get("supersedes")
+        for x in ([sup] if isinstance(sup, str) else sup or []):
+            old = find_entry(st, x)
             if old:
                 old["supersededBy"] = e["id"]
         if wid and work_item(st, wid):
@@ -813,6 +814,16 @@ def fact_trust(root, e):
     return ("verified" if e.get("files") or e.get("evidence") else "claim"), []
 
 
+def needs_review(st, wid, sid):
+    """Work started by other sessions that this session hasn't critiqued yet."""
+    w = st["work"].get(wid)
+    if not w or w.get("createdBy") == sid:
+        return False
+    es = [e for _, e in all_entries(st, wid)]
+    return (any(e["sid"] != sid for e in es)
+            and not any(e["kind"] == "review" and e["sid"] == sid for e in es))
+
+
 def work_report(root, st, wid):
     """Everything needed to render or check a work item."""
     w = st["work"][wid]
@@ -829,14 +840,15 @@ def work_report(root, st, wid):
         if e["kind"] == "fact":
             t, changed = fact_trust(root, e)
             facts.append(dict(e, trust=t, changedFiles=changed))
-    briefs = [e for e in entries if e["kind"] == "brief"]
+    briefs = [e for e in active if e["kind"] == "brief"]
     return {"w": w, "entries": entries, "active": active, "files": files, "facts": facts,
             "brief": briefs[-1] if briefs else None,
             "decisions": [e for e in entries if e["kind"] == "decision"],
             "reviews": [e for e in entries if e["kind"] == "review"],
             "blockers": [e for e in active if e["kind"] == "blocker" and not e.get("resolved")],
             "summaries": [e for e in active if e["kind"] in ("summary", "output")],
-            "plans": [e for e in active if e["kind"] == "plan"]}
+            "plans": [e for e in active if e["kind"] == "plan"],
+            "corrected": [e for e in entries if e.get("supersededBy") and e["kind"] != "decision"]}
 
 
 def sname(st, sid):
@@ -951,6 +963,12 @@ def render_page(root, st, wid):
         if e.get("rejected") and not e.get("supersededBy"):
             A("  - Rejected: " + flag_suspicious(e["rejected"]))
     A("")
+    if r["corrected"]:
+        A("## Corrected claims  _(superseded; do not rely on them)_")
+        for e in r["corrected"][-10:]:
+            A("- ~~%s~~ %s, corrected by %s  _(%s, id %s)_" % (
+                flag_suspicious(e["title"]), e["kind"], e["supersededBy"], prov(st, e), e["id"]))
+        A("")
     A("## Reviews and critiques")
     if not r["reviews"]:
         A("_No one has reviewed this work yet._")
@@ -1161,8 +1179,9 @@ CRITIQUE = ("These notes were written by earlier sessions and may be stale or wr
             "%s show W-xxxx, %s check W-xxxx, verify each claim, plan step and pending task "
             "against the current code and git log, then log your critique: %s log review "
             "\"<verdict>\" --verdict sound|partial|wrong --work W-xxxx -b \"Good: ... Wrong/stale: "
-            "... Do instead: ...\". adopt refuses until you have reviewed the item. Then attach "
-            "and continue from what you verified, not from what the notes say.")
+            "... Do instead: ...\" (add --supersedes <ids> for entries that are false). Edits while attached "
+            "and adopt are refused until you have reviewed the item. Then continue from what you "
+            "verified, not from what the notes say.")
 
 
 def open_work_digest(root, st, sid, limit=6):
@@ -1291,8 +1310,24 @@ def handle_hook(inp):
         mode = os.environ.get("DOCKET_LEASES", "block")
         ti = inp.get("tool_input") or {}
         p = rel(root, ti.get("file_path") or ti.get("notebook_path"))
+        st = load_state(root) if p else None
+        wid = p and st["sessions"].get(sid, {}).get("work")
+        rmode = os.environ.get("DOCKET_REVIEW", "block")
+        if wid and rmode != "off" and needs_review(st, wid, sid):
+            why = ("You are attached to %s, which earlier sessions wrote. Its brief, plan and tasks are "
+                   "unverified claims: critique them before building on them. Read it (%s show %s), "
+                   "check it (%s check %s), compare it with the code and git log, then: %s log review "
+                   "\"<verdict>\" --verdict sound|partial|wrong --work %s -b \"Good: ... Wrong/stale: ... "
+                   "Do instead: ...\" [--supersedes <ids of false entries>] --session %s --agent %s. "
+                   "Edits are allowed once the review is logged." % (wid, cli(), wid, cli(), wid, cli(), wid, sid, who))
+            if rmode == "warn":
+                hook_output(event, "<docket-warning>%s</docket-warning>" % why)
+            else:
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
+                                                         "permissionDecision": "deny",
+                                                         "permissionDecisionReason": why}}))
+                return
         if p and mode != "off":
-            st = load_state(root)
             key, l = blocking_lease(st, p, sid, who)
             mine = st.get("leases", {}).get(p)
             if not l and mode == "block" and not (
@@ -1435,7 +1470,7 @@ def main():
     lg.add_argument("--rejected", help="decision: the option(s) you did not choose and why")
     lg.add_argument("--evidence", help="fact: file:line, or the command you ran and its result")
     lg.add_argument("--verdict", choices=["sound", "partial", "wrong", "unverified"], help="review")
-    lg.add_argument("--supersedes", help="id of an earlier entry this corrects")
+    lg.add_argument("--supersedes", help="id(s) of earlier entries this corrects, comma-separated")
     lg.add_argument("--expect", help="rev you last read; refuse if others changed the item since")
     for k in ("now", "done", "next", "blocked"):
         lg.add_argument("--" + k, help="brief")
@@ -1630,9 +1665,7 @@ def main():
         status = {"adopt": "adopted", "resolve": "done", "drop": "dropped"}[a.cmd]
         if a.cmd == "adopt":  # critique before following: no adopting unreviewed work
             for wid in {find_pending(st, p)[0] for p in a.pids} - {None}:
-                w = st["work"][wid]
-                reviewed = any(e["kind"] == "review" and e["sid"] == sid for _, e in all_entries(st, wid))
-                if not reviewed and w.get("createdBy") != sid:
+                if needs_review(st, wid, sid):
                     sys.exit("Review %s before adopting its tasks; adopting unverified work is blind "
                              "following. Read it (show %s), check it (check %s), verify the tasks against "
                              "the code, then: log review \"<verdict>\" --verdict sound|partial|wrong "
@@ -1689,6 +1722,10 @@ def main():
             live = live_sessions(st, wid, exclude=sid)
             _, st = emit(root, sid=sid, kind="work_attach", wid=wid, role=a.role)
             print("attached to %s (%s) as %s" % (wid, breadcrumb(st, wid), a.role))
+            if needs_review(st, wid, sid):
+                print("Earlier sessions wrote this item. Edits are denied until you log your critique: "
+                      "log review \"<verdict>\" --verdict sound|partial|wrong -b \"...\" "
+                      "[--supersedes <ids of false entries>]")
             if live:
                 print("WARNING: also live in %s. Coordinate; don't fork the work."
                       % ", ".join(x["name"] or x["id"][:8] for x in live))
@@ -1745,10 +1782,13 @@ def main():
             if getattr(a, k):
                 ev[k] = clip(getattr(a, k), 600)
     if a.supersedes is not None:
-        old = find_entry(st, a.supersedes)
-        if not old:
-            sys.exit("No entry with id %s (or the prefix matches several; give more of it)" % a.supersedes)
-        ev["supersedes"] = old["id"]  # full id: a short prefix can become ambiguous later
+        ids = []
+        for x in [x.strip() for x in a.supersedes.split(",") if x.strip()] or [""]:
+            old = find_entry(st, x)
+            if not old:
+                sys.exit("No entry with id %s (or the prefix matches several; give more of it)" % x)
+            ids.append(old["id"])  # full id: a short prefix can become ambiguous later
+        ev["supersedes"] = ids[0] if len(ids) == 1 else ids
     if a.kind == "task":
         ev.update(taskId=a.task_id or uuid.uuid4().hex[:4], subject=a.title, status=a.status)
     target = wid or st["sessions"].get(sid, {}).get("work")
@@ -1768,6 +1808,14 @@ def main():
     extra = "" if s.get("work") or wid else "  (not attached to a work item; run `work new` or `work attach`)"
     if a.kind == "fact" and not ev.get("files"):
         extra += "  (no repo files found in evidence; staleness can't be tracked for this fact)"
+    if a.kind == "review" and a.verdict in ("partial", "wrong") and not a.supersedes and target in st["work"]:
+        claims = [e for e in work_report(root, st, target)["active"]
+                  if e["sid"] != sid and e["kind"] in ("brief", "plan", "summary", "output", "fact", "decision")]
+        if claims:
+            print("Your review found problems. Mark each earlier entry that states something false, so "
+                  "no later session trusts it: log note \"<correction>\" --supersedes <id>[,<id>...]")
+            for e in claims[-6:]:
+                print("  %s %s: %s  (%s)" % (e["id"], e["kind"], clip(e["title"] or e.get("now") or "", 80), prov(st, e)))
     rev = st["work"].get(target or "", {}).get("rev")
     print("logged %s %s%s%s" % (a.kind, ev["id"], " (%s rev %s)" % (target, rev) if rev else "", extra))
     return 0

@@ -50,6 +50,12 @@ nothing matched. Search yourself with `$B search "<words>"`.
    fresh-context subagent only the page path, the repo and the request, so it can't inherit the
    original session's mistakes. Log the result:
    `$B log review "<verdict>" --verdict sound|partial|wrong -b "Good: … Missed: … Do better: …"`
+   This is enforced: while you're attached to an item other sessions wrote, your edits and
+   `adopt` are refused until you have logged a review of it.
+   **Mark every false entry** the review found (a brief claiming work that isn't there, a wrong
+   fact or plan step): `--supersedes <id>[,<id>…]` on the review or on a correcting `note`. The
+   entry is then struck through, listed under "Corrected claims", and no longer shown as the
+   current brief, so the next session doesn't trust it. A newer brief alone doesn't do this.
 3. `$B work attach W-xxxx`, re-verify stale facts, and log fresh ones with `--supersedes <id>`.
 4. If it is **LIVE** in another session, don't work in parallel on the same thing: read its
    brief, tell the user, and split the work (different files or sub-items) or wait.
@@ -153,4 +159,5 @@ A wrong "fact" in shared memory gets repeated by every session that reads it.
 - The docket looks wrong → `$B rebuild` regenerates everything from `events.jsonl`.
 - Setup or upgrade → `python3 ~/.claude/skills/docket/scripts/install.py` (or `--project`), then
   start a new session. Disable for one session with `DOCKET_DISABLE=1 claude`. Soften edit
-  blocking with `DOCKET_LEASES=warn` (inject a warning instead) or turn it off with `off`.
+  blocking with `DOCKET_LEASES=warn` (inject a warning instead) or turn it off with `off`;
+  `DOCKET_REVIEW=warn|off` does the same for the review-before-editing gate.

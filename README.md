@@ -98,8 +98,11 @@ builds on it still looks like it succeeded. Docket treats its own record as susp
   labelled as notes rather than instructions.
 - Instruction-like text in stored notes ("ignore previous instructions", `curl … | sh`) is marked
   `[flagged: …]`.
-- The skill asks for earlier work to be reviewed against the code, ideally by a fresh-context
-  sub-agent, so the reviewer can't inherit the original session's mistakes.
+- Earlier work must be reviewed against the code, ideally by a fresh-context sub-agent, so the
+  reviewer can't inherit the original session's mistakes. A session attached to work other
+  sessions wrote can't edit files or adopt tasks until it has logged that review
+  (`DOCKET_REVIEW=warn|off` to soften). Entries the review finds false are superseded, struck
+  through and listed as corrected claims.
 
 ## Files
 
