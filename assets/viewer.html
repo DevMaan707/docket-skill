@@ -10,6 +10,7 @@
   --rule:#D9D3C7; --rule2:#C9C2B4; --strong:#1F1D1A; --code:#EDE8DF;
   --link:#2C5577; --live:#2C5577; --livedot:#8FA6BC; --wait:#8A5A00; --waitbg:#F2E4C4;
   --decision:#8A4B2A; --plan:#4E6B2B; --stale:#A2461F; --ok:#3D6B35;
+  --okbg:#E3EBDD; --stalebg:#F4DFD3; --livebg:#DFE7EF;
   --serif:"Charter","Bitstream Charter","Sitka Text","Iowan Old Style",Cambria,Georgia,"Times New Roman",serif;
   --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
   --mono:"SF Mono",ui-monospace,Menlo,Consolas,"Liberation Mono",monospace;
@@ -19,6 +20,7 @@
   --rule:#3A3731; --rule2:#4A463F; --strong:#EDE7DB; --code:#2C2A25;
   --link:#9DB8D6; --live:#9DB8D6; --livedot:#9DB8D6; --wait:#E8B85A; --waitbg:#3A3020;
   --decision:#D99A73; --plan:#A9C27F; --stale:#E58B5E; --ok:#8FC283;
+  --okbg:#24301F; --stalebg:#3A2419; --livebg:#1F2A35;
 }
 @media (prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
@@ -26,6 +28,7 @@
     --rule:#3A3731; --rule2:#4A463F; --strong:#EDE7DB; --code:#2C2A25;
     --link:#9DB8D6; --live:#9DB8D6; --livedot:#9DB8D6; --wait:#E8B85A; --waitbg:#3A3020;
     --decision:#D99A73; --plan:#A9C27F; --stale:#E58B5E; --ok:#8FC283;
+    --okbg:#24301F; --stalebg:#3A2419; --livebg:#1F2A35;
   }
 }
 *{box-sizing:border-box}
@@ -119,7 +122,6 @@ code{font-size:.82em;background:var(--code);padding:.08em .38em;border-radius:3p
 .wrow.d1{padding-left:34px}.wrow.d2{padding-left:68px}.wrow.d3{padding-left:102px}
 .wrow.d1 .ttl,.wrow.d2 .ttl,.wrow.d3 .ttl{font-size:19px}
 .type{font:600 11px var(--sans);letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin-left:10px;white-space:nowrap}
-.live{font:600 11px var(--sans);letter-spacing:.1em;text-transform:uppercase;color:var(--live);margin-left:10px}
 .stale{color:var(--stale);font-weight:600}
 .typegroup{margin-top:28px}
 .typegroup .label{display:block;margin-bottom:4px}
@@ -234,6 +236,38 @@ ol.steps li::before{content:counter(s);font:600 15px var(--sans);color:var(--pla
 .emptypage p{font-size:20px;color:var(--ink2)}
 .emptypage pre{display:inline-block;text-align:left;background:var(--code);padding:16px 22px;font-size:14px;margin-top:10px}
 
+/* components: chips, tiles, progress, cards, md tables / checklists / callouts */
+.chip{display:inline-flex;align-items:center;gap:6px;font:600 11.5px/1 var(--sans);letter-spacing:.03em;padding:4px 9px;border-radius:999px;border:1px solid var(--rule2);color:var(--muted);white-space:nowrap;vertical-align:middle;margin-left:8px}
+.chip.t-ok{color:var(--ok);background:var(--okbg);border-color:transparent}
+.chip.t-bad{color:var(--stale);background:var(--stalebg);border-color:transparent}
+.chip.t-live{color:var(--live);background:var(--livebg);border-color:transparent}
+.chip.t-live::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--livedot);animation:breathe 2.4s ease-in-out infinite}
+.chip.t-wait{color:var(--wait);background:var(--waitbg);border-color:transparent}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:32px 0 8px}
+.tile{background:var(--panel);border-radius:12px;padding:16px 18px 18px;text-decoration:none;color:var(--ink)}
+.tile .v{font:600 34px/1.1 var(--sans);font-variant-numeric:tabular-nums}
+.tile .k{font:13px/1.35 var(--sans);color:var(--muted);margin-top:6px}
+.tile.t-ok .v{color:var(--ok)}.tile.t-bad .v{color:var(--stale)}.tile.t-wait .v{color:var(--wait)}.tile.t-live .v{color:var(--live)}
+.bar{height:6px;background:var(--rule);border-radius:99px;overflow:hidden;min-width:90px}
+.bar i{display:block;height:100%;background:var(--ok);border-radius:99px}
+.progress{display:flex;align-items:center;gap:10px;font:13px var(--sans);color:var(--muted);margin-top:8px;justify-content:flex-end}
+.progress .bar{flex:1;max-width:140px}
+.card{border:1px solid var(--rule);border-radius:14px;padding:22px 26px;background:var(--paper)}
+.pending.card ul{margin:6px 0 0}
+.pending.card li{padding:12px 0;margin:0;border-top:1px solid var(--rule);align-items:start}
+.pending.card li:first-child{border-top:0}
+.md table{border-collapse:collapse;width:100%;margin:6px 0 24px;font:15px/1.5 var(--sans);display:block;overflow-x:auto}
+.md th,.md td{border-bottom:1px solid var(--rule);padding:9px 14px 9px 0;text-align:left;vertical-align:top}
+.md th{font-weight:600;color:var(--muted);border-bottom:2px solid var(--rule2)}
+.md li.task{list-style:none;margin-left:-24px;display:flex;gap:10px}
+.md li.task input{margin-top:.45em;accent-color:var(--ok)}
+.md li.task.done > span{color:var(--muted);text-decoration:line-through}
+.md .callout{border-left:3px solid var(--link);background:var(--panel);border-radius:0 10px 10px 0;padding:14px 18px;margin:0 0 20px;font-style:normal;color:var(--ink)}
+.md .callout b.ct{display:block;font:600 12px var(--sans);letter-spacing:.1em;text-transform:uppercase;color:var(--link);margin-bottom:4px}
+.md .callout.warning,.md .callout.caution{border-color:var(--stale)}.md .callout.warning b.ct,.md .callout.caution b.ct{color:var(--stale)}
+.md .callout.tip{border-color:var(--ok)}.md .callout.tip b.ct{color:var(--ok)}
+.md .callout.important{border-color:var(--wait)}.md .callout.important b.ct{color:var(--wait)}
+
 @media (max-width:1100px){main{padding:44px 40px 100px}.entry,.nested{grid-template-columns:150px minmax(0,1fr)}}
 @media (max-width:860px){
   body{font-size:18px}
@@ -254,7 +288,7 @@ ol.steps li::before{content:counter(s);font:600 15px var(--sans);color:var(--pla
   .entry,.nested{grid-template-columns:1fr;gap:6px}
   .nested .n-gut{padding-bottom:0}
   .nested .n-body{border-top:0;padding-top:8px}
-  .wrow{grid-template-columns:1fr}.wrow .facts{text-align:left}
+  .wrow{grid-template-columns:1fr}.wrow .facts{text-align:left}.progress{justify-content:flex-start}
   .wrow.d1{padding-left:16px}.wrow.d2{padding-left:32px}.wrow.d3{padding-left:48px}
   .tabs{gap:16px}.tabs select{min-width:0}
 }
@@ -306,6 +340,12 @@ function rank(s){ return {waiting:0,working:1,quiet:2,finished:3}[stateOf(s)]; }
 function sessions(){ return Object.values(B.sessions||{}).sort(function(a,b){ return rank(a)-rank(b) || b.last-a.last; }); }
 function flag(html){ return html.replace(/\[flagged: ([^\]]*)\]/g,'<span class="flagged" title="Instruction-like text in a stored note; treated as data">flagged: $1</span>'); }
 
+/* ---------- components ---------- */
+function chip(text, tone){ return '<span class="chip'+(tone?" t-"+tone:"")+'">'+esc(text)+'</span>'; }
+function tiles(arr){ return '<div class="tiles">'+arr.map(function(t){ return '<'+(t.href?'a href="'+t.href+'"':'div')+' class="tile'+(t.tone&&t.v?" t-"+t.tone:"")+'"><div class="v">'+esc(t.v)+'</div><div class="k">'+esc(t.k)+'</div></'+(t.href?'a':'div')+'>'; }).join("")+'</div>'; }
+function progressOf(wid){ var p=((B.index||{})[wid]||{}).pendingItems||[], live=p.filter(function(x){return x.status!=="dropped";}), d=live.filter(function(x){return x.status==="done";}).length; return {done:d, total:live.length}; }
+function progressHtml(wid){ var p=progressOf(wid); if(!p.total) return ""; return '<div class="progress"><div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="'+p.total+'" aria-valuenow="'+p.done+'"><i style="width:'+Math.round(100*p.done/p.total)+'%"></i></div><span>'+p.done+'/'+p.total+' tasks</span></div>'; }
+
 /* ---------- markdown (small, escapes first) ---------- */
 function inline(t){
   var codes=[]; t=t.replace(/`([^`]+)`/g,function(_,c){ codes.push(c); return "\u0000"+(codes.length-1)+"\u0000"; });
@@ -328,9 +368,19 @@ function md(src){
       while(i<L.length && (ord? /^\s*\d+[.)]\s+/.test(L[i]) : /^\s*[-*]\s+/.test(L[i]))){
         var txt=L[i].replace(/^\s*(?:[-*]|\d+[.)])\s+/,""); i++;
         while(i<L.length && /^\s{2,}\S/.test(L[i]) && !/^\s*(?:[-*]|\d+[.)])\s+/.test(L[i])) txt+=" "+L[i++].trim();
-        li.push("<li>"+inline(txt)+"</li>"); }
+        var tk=txt.match(/^\[([ xX])\]\s+(.*)/);
+        li.push(tk? '<li class="task'+(tk[1]===" "?"":" done")+'"><input type="checkbox" disabled'+(tk[1]===" "?"":" checked")+' aria-label="'+(tk[1]===" "?"open":"done")+'"><span>'+inline(tk[2])+"</span></li>" : "<li>"+inline(txt)+"</li>"); }
       out.push("<"+tag+">"+li.join("")+"</"+tag+">"); continue; }
-    if(/^>\s?/.test(l)){ flush(); var q=[]; while(i<L.length && /^>\s?/.test(L[i])) q.push(L[i++].replace(/^>\s?/,"")); out.push("<blockquote>"+inline(q.join(" "))+"</blockquote>"); continue; }
+    if(/^>\s?/.test(l)){ flush(); var q=[]; while(i<L.length && /^>\s?/.test(L[i])) q.push(L[i++].replace(/^>\s?/,""));
+      var co=q[0].match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
+      if(co){ q[0]=co[2]; out.push('<blockquote class="callout '+co[1].toLowerCase()+'"><b class="ct">'+co[1].toLowerCase()+'</b>'+inline(q.join(" ").trim())+"</blockquote>"); continue; }
+      out.push("<blockquote>"+inline(q.join(" "))+"</blockquote>"); continue; }
+    if(/^\s*\|/.test(l) && i+1<L.length && /^\s*\|?\s*:?-{2,}/.test(L[i+1])){ flush();
+      var cells=function(r){ return r.trim().replace(/^\||\|$/g,"").split("|").map(function(c){return inline(c.trim());}); };
+      var th=cells(l), rows=[]; i+=2;
+      while(i<L.length && /^\s*\|/.test(L[i])) rows.push(cells(L[i++]));
+      out.push("<table><thead><tr>"+th.map(function(c){return "<th>"+c+"</th>";}).join("")+"</tr></thead><tbody>"+
+        rows.map(function(r){return "<tr>"+r.map(function(c){return "<td>"+c+"</td>";}).join("")+"</tr>";}).join("")+"</tbody></table>"); continue; }
     if(!l.trim()){ flush(); i++; continue; }
     para.push(l.trim()); i++;
   }
@@ -383,6 +433,13 @@ function overview(){
   var h='<div class="col"><div class="top"><span>'+esc(B.project)+'</span><span>'+esc(B.root)+'</span></div>';
   h+='<h1 class="masthead">Agent Journal</h1>';
   h+='<div class="dateline"><span>'+d.toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long",year:"numeric"})+'</span><span>'+list.length+' session'+(list.length===1?"":"s")+(B.updated?' · last word '+ago(B.updated):"")+'</span></div>';
+  var rows=Object.values(B.index||{}), sum=function(k){ return rows.reduce(function(n,r){return n+(r[k]||0);},0); };
+  if(list.length) h+=tiles([
+    {v:list.filter(function(s){return stateOf(s)==="working";}).length, k:"sessions writing now", tone:"live"},
+    {v:list.filter(function(s){return stateOf(s)==="waiting";}).length, k:"waiting on you", tone:"wait"},
+    {v:Object.values(B.work||{}).filter(function(w){return w.status==="open";}).length, k:"open work items"},
+    {v:sum("orphaned"), k:"pending tasks nobody owns", tone:"wait"},
+    {v:sum("stale"), k:"stale facts to re-check", tone:"bad"}]);
   if(!list.length){
     h+='<div class="emptypage" style="margin-top:80px"><h2>Nothing has been written yet.</h2><p>When a Claude Code session starts in this folder, its plans, decisions and outputs will appear here as they are written.</p><pre>claude                     # start a session here\ndocket.py log plan "…"      # or write an entry by hand</pre></div>';
     return h+indexSection()+'</div>'; }
@@ -410,9 +467,9 @@ function wrow(w, depth){
   var b=((B.index||{})[w.id]||{}).brief||"";
   var liveS=Object.values(B.sessions).filter(function(s){return s.work===w.id && stateOf(s)!=="finished" && stateOf(s)!=="quiet";});
   return '<div class="wrow d'+Math.min(depth,3)+'"><div><div class="ttl"><span class="id">'+w.id+'</span><a href="#/w/'+w.id+'">'+esc(w.title)+'</a><span class="type">'+esc(w.type||"feature")+'</span>'+
-    (w.status!=="open"?'<span class="type">· '+esc(w.status)+'</span>':'')+(liveS.length?'<span class="live">live</span>':'')+'</div>'+
+    (w.status!=="open"?chip(w.status, w.status==="done"?"ok":""):'')+(liveS.length?chip("live","live"):'')+'</div>'+
     '<div class="sub">'+(b?inline(b)+' · ':'')+'updated '+ago(w.updated)+'</div></div>'+
-    '<div class="facts">'+factsLine(w)+'</div></div>'; }
+    '<div class="facts">'+factsLine(w)+progressHtml(w.id)+'</div></div>'; }
 function factsLine(w){
   var st=workStats(w.id), parts=[];
   if(st.pending) parts.push(st.pending+" pending");
@@ -471,7 +528,7 @@ function renderEntry(e, nested){
       (e.kind==="summary"&&tb.t?'<h3 style="font-size:26px;margin-bottom:14px">'+inline(tb.t)+'</h3>':'')+longText(e.id, tb.b||tb.t);
   } else if(e.kind==="fact"){
     var t=((B.index||{})[e.wid]||{}).factTrust; t=t&&t[e.id];
-    var tl={verified:'<span class="trust v">verified</span>',stale:'<span class="trust s">stale, re-check</span>',aging:'<span class="trust c">aging</span>',claim:'<span class="trust c">no evidence</span>'}[t]||"";
+    var tl={verified:chip("verified","ok"),stale:chip("stale, re-check","bad"),aging:chip("aging","wait"),claim:chip("no evidence")}[t]||"";
     body='<div class="lede"><b>'+inline(tb.t)+'</b>'+tl+(e.evidence?' Evidence: <code>'+esc(e.evidence)+'</code>':'')+'</div>'+
       (tb.b?'<div class="md" style="margin-top:12px">'+md(tb.b)+'</div>':'')+'<div class="by">Checked by '+agentShort(e.agent)+(e.head?' at <code>'+esc(e.head)+'</code>':'')+'</div>';
   } else if(e.kind==="review"){
@@ -561,18 +618,22 @@ function workPage(wid){
   h+='<h1 class="title">'+esc(w.title)+'</h1>';
   var briefs=es.filter(function(e){return e.kind==="brief";}), lb=briefs[briefs.length-1];
   h+='<section class="brief"><div class="head"><span class="label">Where it stands</span><span>'+(lb?"brief "+ago(lb.ts):"no brief yet")+'</span></div>';
-  h+='<div class="now">'+(lb&&lb.now?inline(lb.now):'<span class="empty">Nobody has written a brief for this work item yet.</span>')+'</div>';
+  h+='<div class="now">'+(lb&&(lb.now||lb.title)?inline(lb.now||lb.title):'<span class="empty">Nobody has written a brief for this work item yet.</span>')+'</div>';
   h+='<div class="cols lists"><div><span class="label">Sessions</span><ul>'+(w.sessions||[]).map(function(x){var s=B.sessions[x.sid]; return '<li><a href="#/s/'+encodeURIComponent(x.sid)+'">'+esc(s?sname(s):x.sid.slice(0,8))+'</a> <span class="small-id">'+esc(x.role)+'</span>'+(s?' · '+SLABEL[stateOf(s)]:'')+'</li>';}).join("")+'</ul></div>';
   h+='<div><span class="label">Trust</span><ul><li>'+es.filter(function(e){return e.kind==="fact"&&!e.supersededBy;}).length+' facts with evidence'+(row.stale?', <span class="stale">'+row.stale+' stale</span>':'')+'</li><li>'+es.filter(function(e){return e.kind==="review";}).length+' reviews</li><li>Everything else is an unverified claim</li></ul></div></div>';
   h+='</section>';
+  var pg=progressOf(wid), facts=es.filter(function(e){return e.kind==="fact"&&!e.supersededBy;}).length;
+  h+=tiles([{v:pg.total?pg.done+"/"+pg.total:"0", k:"tasks done"}, {v:row.orphaned||0, k:"pending, nobody owns", tone:"wait"},
+            {v:facts-(row.stale||0), k:"verified facts", tone:"ok"}, {v:row.stale||0, k:"stale facts", tone:"bad"},
+            {v:es.filter(function(e){return e.kind==="review";}).length, k:"reviews"}]).replace('class="tiles"','class="tiles" style="margin-bottom:70px"');
   var ch=kids(wid);
   if(ch.length){ h+='<section class="index" style="margin:0 0 70px"><div class="secthead"><span class="label">Sub-items</span><span class="n">· '+ch.length+'</span></div>';
     (function walk(ws,depth){ ws.forEach(function(c){ h+=wrow(c,depth); walk(kids(c.id),depth+1); }); })(ch,0); h+='</section>'; }
   var pend=(row.pendingItems||[]);
   if(pend.length){
-    var g={open:"[ ]",active:"[~]",adopted:"[>]",done:"[x]",dropped:"[-]"};
-    h+='<section class="pending" style="margin-bottom:70px"><div class="secthead"><span class="label">Pending work</span><span class="n">· '+pend.filter(function(p){return p.status==="open";}).length+' nobody owns</span></div><ul>'+
-      pend.map(function(p){ return '<li class="s-'+p.status+'"><span class="g">'+g[p.status]+'</span><div><span class="txt">'+inline(p.subject)+'</span><small><span class="mono">'+esc(p.pid)+'</span> · '+esc(p.status)+' · '+esc(p.source)+(p.reason?' · '+esc(p.reason):'')+'</small></div></li>'; }).join("")+'</ul></section>'; }
+    var g={open:"○",active:"◐",adopted:"◑",done:"✓",dropped:"–"}, tone={open:"wait",active:"live",adopted:"",done:"ok",dropped:""};
+    h+='<section class="pending card" style="margin-bottom:70px"><div class="secthead"><span class="label">Pending work</span><span class="n">· '+pend.filter(function(p){return p.status==="open";}).length+' nobody owns</span></div><ul>'+
+      pend.map(function(p){ return '<li class="s-'+p.status+'"><span class="g">'+g[p.status]+'</span><div><span class="txt">'+inline(p.subject)+'</span><small><span class="mono">'+esc(p.pid)+'</span>'+chip(p.status,tone[p.status])+' · '+esc(p.source)+(p.reason?' · '+esc(p.reason):'')+'</small></div></li>'; }).join("")+'</ul></section>'; }
   h+='<div class="recordhead"><span class="label">The record</span><span class="n">· '+es.length+' entries from every session</span></div><div class="tabs"></div>';
   es.slice().reverse().filter(function(e){return e.kind!=="brief";}).forEach(function(e){ h+=renderEntry(e,false); });
   return h+'</div>'; }

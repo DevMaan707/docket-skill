@@ -112,6 +112,10 @@ brief without `--next` doesn't clear earlier next items; resolve or drop them ex
 | `summary` | when you finish, and a subagent before it returns | what's done, what's left, caveats |
 | `note` | anything else | |
 
+Bodies (`-b`) are markdown, and the viewer renders tables, `- [ ]` / `- [x]` checklists and
+callouts (`> [!NOTE]`, `> [!WARNING]`, `> [!TIP]`, `> [!IMPORTANT]`). Use them when they make the
+state easier to scan: a results table, a checklist of steps, a warning about a known gap.
+
 Name the session once: `$B name "<2-5 words>"`. Mark finished work: `$B work status W-xxxx done`.
 
 ### Update after every big change, but check first
