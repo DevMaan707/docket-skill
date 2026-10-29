@@ -77,7 +77,7 @@ RELIEF = re.compile(r"^\s*(?:sudo\s+)?(?:kill|pkill|killall|ps|top|htop|pgrep|fr
                     r"git\s+(?:status|log|diff|add|commit|push|stash)|\S*python3?\s+\S*docket\.py)\b")
 HEAVY = re.compile(r"\b(?:make|cmake|ninja|go\s+(?:build|test|run|vet)|cargo|rustc|mvn|gradlew?|javac|npm|pnpm|yarn|"
                    r"bun|tsc|webpack|vite|jest|vitest|pytest|docker|podman|bazel|clang|gcc|g\+\+|xcodebuild|swift\s+build|"
-                   r"semgrep|codeql|dependency-check)\b|\.sh\b")
+                   r"semgrep|codeql|dependency-check)\b")
 CHARTER = """How to work under it (autonomous mode, set by the user):
 - Coordinate first, then divide. Read the goal thread (board) and the lanes (lanes). Reply on the
   thread with what you propose to own and why, and any doubts about the goal or the others'
@@ -1889,6 +1889,16 @@ def keep_going(st, sid):
             % (c, c, c, s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
 
 
+def is_heavy(cmd):
+    """A build, test run, container or scan in command position (not just named in a message or heredoc)."""
+    cmd = re.sub(r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\s*\1\b", "", cmd or "", flags=re.S)  # heredoc bodies are data
+    for seg in re.split(r"&&|\|\||[;|\n]", cmd):
+        seg = re.sub(r"^\s*(?:(?:sudo|time|nohup|nice(?:\s+-n\s*\d+)?|exec)\s+|\w+=\S*\s+)*", "", seg)
+        if HEAVY.match(seg) or re.match(r"\S+\.sh\b", seg):
+            return True
+    return False
+
+
 def memory(root="/"):
     """Machine headroom: {'level': normal|warn|critical, 'why': [...], 'total', 'avail', 'disk'}.
     One cheap call per platform: the hook runs it before every shell command and agent spawn."""
@@ -1984,7 +1994,7 @@ def mem_guard(root, sid, who, tool, ti):
             return None, ("<docket-warning>Memory is tight on this machine (%s) and %d subagents are running here "
                           "(about %d fit). Prefer a light subagent, or wait for one to finish if this one runs builds "
                           "or scans.</docket-warning>" % (why, n, cap))
-    if HEAVY.search(cmd):
+    if is_heavy(cmd):
         return None, ("<docket-warning>Memory is tight on this machine (%s). Before this heavy job: make sure no "
                       "other heavy build or scan is running here, cap its parallelism and memory, and run it in "
                       "the background. Lag is fine; running out of memory is not.</docket-warning>" % why)
