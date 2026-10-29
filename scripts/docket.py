@@ -487,6 +487,39 @@ def pending_items(st, wid):
     return out
 
 
+_GITLOG = {}
+
+
+def recent_commits(root):
+    """(sha, subject, ts) of the last week's commits, cached for a minute."""
+    hit = _GITLOG.get(root)
+    if hit and now() - hit[0] < 60:
+        return hit[1]
+    rows = []
+    try:
+        r = subprocess.run(["git", "-C", root, "log", "--since=7.days", "--format=%h%x09%ct%x09%s", "-300"],
+                           capture_output=True, timeout=10)
+        for line in r.stdout.decode(errors="replace").splitlines():
+            sha, ts, subj = (line.split("\t", 2) + ["", ""])[:3]
+            rows.append((sha, subj, float(ts or 0)))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    _GITLOG[root] = (now(), rows)
+    return rows
+
+
+def maybe_done(st, it):
+    """A commit since the task appeared whose message shares most of the task's words."""
+    want = set(re.findall(r"[a-z0-9]{4,}", it["subject"].lower())) - {"asked", "session", "unblock"}
+    if len(want) < 2:
+        return None
+    for sha, subj, ts in recent_commits(st.get("root") or "."):
+        have = set(re.findall(r"[a-z0-9]{4,}", subj.lower()))
+        if ts >= it["ts"] and len(want & have) >= max(2, int(0.5 * len(want))):
+            return "%s %s" % (sha, clip(subj, 70))
+    return None
+
+
 def audit(st):
     """Tasks that need a look: unowned or long-running, done without evidence, items whose tasks
     are all finished but still open, and open items nobody has touched in days."""
@@ -498,8 +531,10 @@ def audit(st):
         for i in pend:
             hrs = (now() - i["ts"]) / 3600
             if i["status"] == "open":
-                out.append((w["id"], i["pid"], "NOT DONE", "%s; nobody owns it%s" % (
-                    i["subject"], ", for %d h" % hrs if hrs >= 1 else "")))
+                md = maybe_done(st, i)
+                out.append((w["id"], i["pid"], "DONE?" if md else "NOT DONE", "%s; %s%s" % (
+                    i["subject"], "a commit looks like it: %s (resolve with that as evidence if so)" % md if md
+                    else "nobody owns it", ", for %d h" % hrs if hrs >= 1 else "")))
             elif i["status"] in ("active", "adopted") and hrs >= STALE_HOURS:
                 out.append((w["id"], i["pid"], "STALE", "%s; %s by %s for %d h: still going, done, or abandoned?" % (
                     i["subject"], i["status"], sname(st, i["by"]) if i.get("by") else "?", hrs)))
@@ -630,6 +665,8 @@ def apply(st, ev):
         s["pid"], s["host"] = ev["pid"], ev.get("host")
     if kind in PROGRESS_KINDS:  # what counts as doing something, for the goal's keep-going
         s["progressTs"] = ts
+    if kind == "session_start" and ev.get("cwd"):
+        s["cwd"] = ev["cwd"]
     if sid == "user" and not s["name"]:
         s["name"] = "You (from a terminal)"
     if ev.get("sock"):
@@ -651,6 +688,14 @@ def apply(st, ev):
                 if l.get("sid") == o["id"]:
                     l["sid"] = sid
             o["status"], o["next"] = "ended", sid
+    elif kind == "sweep":
+        s["sweepTs"] = ts
+    elif kind == "pause":
+        st["paused"] = {"ts": ts, "sid": sid, "why": body}
+    elif kind == "resume":
+        st["paused"] = None
+    elif kind == "needs_seen":
+        s["needsSeen"] = (s.get("needsSeen", []) + [i for i in ev.get("ids") or [] if i not in s.get("needsSeen", [])])[-200:]
     elif kind == "lock":
         st.setdefault("locks", {})[ev["key"]] = {"name": title, "sid": sid, "ts": ts, "until": ev["until"], "why": body}
     elif kind == "unlock":
@@ -863,10 +908,11 @@ def apply(st, ev):
             else:
                 s["summary"] = title + ("\n\n" + body if body else "")
     elif kind == "unblock":
-        for e in s["entries"]:
-            if e["kind"] == "blocker":
+        o = st["sessions"].get(ev.get("refSid")) or s  # the user unblocks another session's blocker by id
+        for e in o["entries"]:
+            if e["kind"] == "blocker" and (not ev.get("ref") or e.get("id") == ev["ref"]):
                 e["resolved"] = True
-        for b in s["blockers"]:
+        for b in o["blockers"]:
             b["open"] = False
 
     for t in {ev.get("wid"), wid} - {None}:  # rev = the last event that changed this item
@@ -952,7 +998,17 @@ def emit(root, _guard=None, **ev):
         for x in gone:  # crashed or killed without SessionEnd: record it so every reader agrees
             _append(root, st, dict(ts=ev["ts"], id=uuid.uuid4().hex[:10], agent="main", sid=x["id"],
                                    kind="session_end", title="Session ended (process exited)"))
+        prev_red = ev.get("kind") == "metric" and (latest_metric(st, ev.get("title")) or {}).get("status") == "red"
         _append(root, st, ev)
+        k_ = ev["kind"]
+        if k_ == "metric" and ev.get("status") == "red" and not prev_red:
+            notify("%s is red" % ev["title"], " ".join("%s=%s" % kv for kv in (ev.get("vals") or {}).items()))
+        elif k_ == "metric" and goal_target(st)[1]:
+            notify("goal target reached", goal_target(st)[0])
+        elif k_ == "blocker":
+            notify("blocked: " + clip(ev.get("title"), 60), "%s needs help: %s" % (sname(st, ev["sid"]), clip(ev.get("body"), 160)))
+        elif k_ == "msg" and "user" in (ev.get("to") or []):
+            notify("%s asks you" % sname(st, ev["sid"]), ev.get("title", ""))
         if ev["kind"] in ("msg", "msg_fix", "msg_unread", "goal_set", "directive_add", "directive_drop"):  # lets hooks spot new mail without loading state
             with open(os.path.join(bdir(root), "mail.stamp"), "w") as f:
                 f.write(ev["id"])
@@ -1528,7 +1584,7 @@ def handle_hook(inp):
                     f.write('export DOCKET_ROOT="%s"\nexport DOCKET_SESSION="%s"\n' % (root, sid))
             except OSError:
                 pass
-        _, st = emit(root, kind="session_start", title="Session " + inp.get("source", "start"),
+        _, st = emit(root, kind="session_start", title="Session " + inp.get("source", "start"), cwd=inp.get("cwd") or root,
              name=os.environ.get("DOCKET_NAME", ""), pid=claude_pid(), host=socket.gethostname(),
              sock=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""), **E)
         resumed = None
@@ -1553,6 +1609,7 @@ def handle_hook(inp):
 
     elif event == "UserPromptSubmit":
         prompt = inp.get("prompt") or ""
+        last_prompt = load_state(root)["sessions"].get(sid, {}).get("promptTs", 0)
         _, st = emit(root, kind="prompt", title=clip(prompt, 120), body=clip(prompt, 8000),
                      pid=claude_pid(), host=socket.gethostname(), sock=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""), **E)
         mail_waiting(root, sid)  # mark checked; the mail itself goes out below
@@ -1570,10 +1627,26 @@ def handle_hook(inp):
                if added else None,
                directives_block(st, only=old, full=False) if old else None,
                goal_block(st, full=False) if seen else None, stale_brief(st, sid), deliver(root, sid, st)]
+        nb, nids = needs_block(st, sid)
+        if nids:
+            ctx.append(nb)
+            emit(root, kind="needs_seen", ids=nids, title="Told the user about %d items" % len(nids), **E)
+        away = now() - last_prompt if last_prompt else 0
+        if away > 2 * 3600:
+            dg = away_digest(st, last_prompt, sid)
+            if dg:
+                ctx.append("<docket-digest>The user is back after %s. Other sessions since then:\n%s\nStart your reply with a "
+                           "3-line recap of this for the user.</docket-digest>" % (ago(last_prompt).replace(" ago", ""),
+                                                                                   "\n".join(dg[:12])))
+        if st.get("paused"):
+            ctx.append("<docket>The user paused all sessions %s. Do only what this prompt asks; start no agents or long "
+                       "jobs until they run resume.</docket>" % ago(st["paused"]["ts"]))
         hook_output(event, "\n".join(x for x in ctx if x))
 
     elif event == "PreToolUse" and inp.get("tool_name") in ("Bash", "Agent", "Task"):
         deny, warn = mem_guard(root, sid, who, inp.get("tool_name"), inp.get("tool_input") or {})
+        if not deny and inp.get("tool_name") in ("Agent", "Task") and os.path.exists(os.path.join(bdir(root), "paused")):
+            deny = "The user paused all sessions: no new agents until they run resume. Finish your step and write your brief."
         if deny:
             print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
                                                      "permissionDecisionReason": deny}}))
@@ -1708,6 +1781,14 @@ def handle_hook(inp):
             st = load_state(root)
             late = deliver(root, sid, st)  # arrived while this turn was finishing
             due = [m for m in open_asks(st, sid) if now() > ask_due(m)]
+            mine = duties(st, sid) if not late and not st.get("paused") and os.environ.get("DOCKET_SWEEP") != "off" else []
+            if mine and now() - st["sessions"].get(sid, {}).get("sweepTs", 0) > 3600:
+                emit(root, kind="sweep", title="Asked to settle %d stale tasks" % len(mine), **E)
+                late = ("Before you go idle, settle these stale or unowned tasks; they're assigned to you so nothing is "
+                        "forgotten (one hour until the next check):\n%s\nFor each, check the code and git log, then: done -> "
+                        "%s resolve <id> --reason \"<evidence>\"; yours to do -> adopt <id>; no longer needed -> drop <id> "
+                        "--reason; another session's -> msg it; an item with nothing left -> work status W-xxxx done."
+                        % ("\n".join("- %s %s %s: %s" % r for r in mine[:6]), cli()))
             if not late and due:
                 late = ("Asks to you are past their deadline with no reply:\n%s\nAnswer each (%s reply <id> \"...\"), even "
                         "if only to say you can't or when you will, then stop." % ("\n".join(
@@ -1760,6 +1841,9 @@ def recipients(st, sid, tokens_):
     for t in [t.strip() for t in tokens_ if t.strip()]:
         if t.lower() in ("board", "all"):
             out.append(t.lower())
+            continue
+        if t.lower() in ("user", "you", "me"):
+            out.append("user")
             continue
         if re.fullmatch(r"(?i)w-?\d+", t):
             out.append(resolve_wid(st, re.sub(r"\D", "", t)) or sys.exit("No such work item: %s" % t))
@@ -1875,6 +1959,27 @@ def goal_block(st, full=True):
                       "subagent you spawn." % cli(), "</docket-goal>"])
 
 
+def task_owner(st, wid, pid):
+    """Who must settle an audit finding: the session an ask went to, else a live session on the
+    item, else a live session picked by a stable hash so the load spreads and nothing is skipped."""
+    live = sorted(x["id"] for x in st["sessions"].values() if is_live(x) and x["id"] not in ("user", "manual"))
+    if not live:
+        return None
+    if pid.startswith("A-"):
+        m = next((m for m in st.get("msgs", []) if m["id"].startswith(pid[2:])), None)
+        to = [x for x in (m or {}).get("to", []) if x in live]
+        if to:
+            return to[0]
+    on = sorted(x["id"] for x in live_sessions(st, wid))
+    pool = on or live
+    return pool[int(hashlib.md5((pid if pid != "-" else wid).encode()).hexdigest(), 16) % len(pool)]
+
+
+def duties(st, sid):
+    me = selves(st, sid)
+    return [r for r in audit(st) if task_owner(st, r[0], r[1]) in me]
+
+
 def audit_line(st):
     rows = audit(st)
     if not rows:
@@ -1979,7 +2084,8 @@ def deliver(root, sid, st=None):
 def keep_going(st, sid):
     """Stop-hook reason to continue, when an autonomous goal is open and nothing justifies stopping."""
     g, s = st.get("goal"), st["sessions"].get(sid, {})
-    if not (g and g["status"] == "active" and g["autonomous"]) or os.environ.get("DOCKET_GOAL_STOP") == "off":
+    if not (g and g["status"] == "active" and g["autonomous"]) or os.environ.get("DOCKET_GOAL_STOP") == "off" \
+            or st.get("paused"):
         return None
     lane = any(l["sid"] == sid for l in st.get("lanes", {}).values())
     joined = lane or g["sid"] == sid or any(m["sid"] == sid and m["re"] == g.get("thread") for m in st.get("msgs", []))
@@ -2440,6 +2546,75 @@ def committed_paths(root, cmd):
     return sorted(paths)
 
 
+def needs_user(st):
+    """What only the user can settle: questions and asks to the user, and open blockers."""
+    out = []
+    msgs = st.get("msgs", [])
+    for m in msgs:
+        if "user" in m["to"] and not any(r["re"] == m["id"] and r["sid"] == "user" for r in msgs):
+            out.append({"id": m["id"], "what": "%s from %s" % ("Question" if m.get("kind") == "ask" else "Note",
+                                                                  sname(st, m["sid"])), "title": m["title"], "ts": m["ts"]})
+    for x in st["sessions"].values():
+        for e in x.get("entries", []):
+            if e["kind"] == "blocker" and not e.get("resolved") and not e.get("supersededBy") and now() - e["ts"] < 7 * 86400:
+                out.append({"id": e["id"], "what": "Blocker%s from %s" % (" on " + e["wid"] if e.get("wid") else "",
+                                                                         sname(st, x["id"])),
+                            "title": e["title"], "ts": e["ts"]})
+    return sorted(out, key=lambda x: x["ts"])
+
+
+def needs_block(st, sid):
+    s = st["sessions"].get(sid, {})
+    new = [n for n in needs_user(st) if n["id"] not in s.get("needsSeen", [])]
+    if not new:
+        return None, []
+    return ("<docket-needs-you>%d item%s waiting for the user across all sessions (full list: %s needs). Tell the user "
+            "about these in one short line each at the start of your reply:\n%s\nThe user answers with: %s answer <id> "
+            "\"...\"</docket-needs-you>" % (len(new), "" if len(new) == 1 else "s", cli(), "\n".join(
+                "- [%s] %s: %s" % (n["id"], n["what"], clip(flag_suspicious(n["title"]), 140)) for n in new[:8]), cli()),
+            [n["id"] for n in new])
+
+
+def away_digest(st, since, sid=None):
+    """What happened since a time, per session, for a user coming back."""
+    out = []
+    for x in sorted(st["sessions"].values(), key=lambda x: -x["last"]):
+        if x["id"] in ("user", "manual") or x["last"] < since or (sid and x["id"] in selves(st, sid)):
+            continue
+        b = x.get("brief") if isinstance(x.get("brief"), dict) else {}
+        n = sum(1 for e in x.get("entries", []) if e.get("ts", 0) >= since)
+        out.append("- %s%s: %s%s" % (x["name"] or x["id"][:8], " (%s)" % x["work"] if x.get("work") else "",
+                                     clip(b.get("now") or x.get("statusText") or "no brief", 140),
+                                     "; %d entries" % n if n else ""))
+    for name, rows in st.get("metrics", {}).items():
+        new = [r for r in rows if r["ts"] >= since]
+        if new:
+            old = next((r for r in reversed(rows) if r["ts"] < since), None)
+            out.append("- metric %s: %s%s%s" % (name, " ".join("%s=%s" % kv for kv in new[-1]["vals"].items()),
+                                                " (was %s)" % " ".join("%s=%s" % kv for kv in old["vals"].items()) if old else "",
+                                                " RED" if new[-1]["status"] == "red" else ""))
+    g = st.get("goal") or {}
+    if g.get("endTs", 0) >= since:
+        out.append("- the goal was marked %s: %s" % (g["status"], clip(g.get("note"), 160)))
+    return out
+
+
+def notify(title, text):
+    """A desktop notification for things the user should see without looking (macOS, or notify-send)."""
+    if os.environ.get("DOCKET_NOTIFY") == "off" or "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    try:
+        if sys.platform == "darwin":
+            q = lambda t: '"%s"' % clip(t, 220).replace("\\", "").replace('"', "'")
+            subprocess.Popen(["osascript", "-e", "display notification %s with title %s" % (q(text), q("docket: " + title))],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif shutil.which("notify-send"):
+            subprocess.Popen(["notify-send", "docket: " + title, clip(text, 220)], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
 def team_block(st, sid):
     """Who else is live, on what: so a session starts as one of a team, not alone."""
     me = selves(st, sid)
@@ -2895,6 +3070,18 @@ def main():
     mx_ = sub.add_parser("metrics", help="latest value of every metric and gate, with the change since the one before")
     mx_.add_argument("name", nargs="?")
     sub.add_parser("asks", help="asks nobody has answered yet, overdue first")
+    sub.add_parser("needs", help="what waits for the user: questions, asks and blockers from every session")
+    an_ = sub.add_parser("answer", help="the user answers a question from the needs list")
+    an_.add_argument("ref")
+    an_.add_argument("title")
+    an_.add_argument("-b", "--body", default="")
+    dg_ = sub.add_parser("digest", help="what every session did since a time")
+    dg_.add_argument("--hours", type=float, default=8)
+    pz_ = sub.add_parser("pause", help="the user pauses every session: finish the current step, write a brief, stop")
+    pz_.add_argument("--why", default="")
+    sub.add_parser("resume", help="the user resumes every session")
+    sub.add_parser("statusline", help="one line for Claude Code's status line (reads its JSON on stdin)")
+    sub.add_parser("relaunch", help="commands to reopen every recent session with its own identity")
     sub.add_parser("ready", help="work nobody is on whose blockers are closed: pick from here when idle")
     ls_ = sub.add_parser("listen", help="wait for mail (run in the background): exits when a message arrives, waking you")
     ls_.add_argument("--hours", type=float, default=12)
@@ -2926,6 +3113,32 @@ def main():
             sys.stderr.write("docket: %s\n" % e)
         return 0
 
+    if a.cmd == "statusline":
+        try:
+            inp_ = json.loads(sys.stdin.read() or "{}")
+        except ValueError:
+            inp_ = {}
+        os.environ.pop("DOCKET_ROOT", None)  # the status line follows the session's folder, nothing else
+        root = find_root((inp_.get("workspace") or {}).get("current_dir") or inp_.get("cwd"))
+        if not os.path.isdir(bdir(root)):
+            return 0  # not a docket project: say nothing, create nothing
+        st = load_state(root)
+        me = inp_.get("session_id") or ""
+        parts = []
+        nu = len(needs_user(st))
+        if nu:
+            parts.append("%d need you" % nu)
+        unread = len(inbox(st, me)) if me in st["sessions"] else 0
+        if unread:
+            parts.append("%d mail" % unread)
+        parts += ["%s RED" % n_ for n_, r in st.get("metrics", {}).items() if r and r[-1]["status"] == "red"]
+        mine = [l["name"] for l in st.get("locks", {}).values() if now() < l["until"]]
+        if mine:
+            parts.append("held: " + ", ".join(mine[:3]))
+        if st.get("paused"):
+            parts.append("PAUSED")
+        print("docket: " + (" · ".join(parts) if parts else "all clear"))
+        return 0
     root = find_root()
     ensure_board(root)
     viewer = os.path.join(bdir(root), "index.html")
@@ -3243,6 +3456,63 @@ def main():
                                                 " on " + cur["box"] if cur["box"] else "", ago(cur["ts"])))
         if not names:
             print("No metrics yet. Record one: metric <name> key=value ... [--sha] [--box] [--status green|red]")
+        return 0
+    if a.cmd == "needs":
+        rows = needs_user(st)
+        for n in rows:
+            print("[%s] %s, %s: %s" % (n["id"], n["what"], ago(n["ts"]), n["title"]))
+        print("Answer with: %s answer <id> \"...\"" % cli() if rows else "Nothing waits for you.")
+        return 0
+    if a.cmd == "answer":
+        if "CLAUDECODE" in os.environ:
+            sys.exit("Only the user answers from the needs list. Pass the question on to them instead.")
+        m = find_msg(st, a.ref)
+        if m:
+            ev, st = emit(root, sid="user", kind="msg", to=[m["sid"]], re=m["re"] or m["id"], title=clip(a.title, 200),
+                          body=clip(a.title + ("\n\n" + a.body if a.body else "") if len(a.title) > 200 else a.body, 6000),
+                          msgKind="fyi")
+            wake(st, ev)
+            print("answered %s; %s gets it now" % (m["id"], sname(st, m["sid"])))
+            return 0
+        wid, e = next(((e.get("wid"), dict(e, sid=x["id"])) for x in st["sessions"].values() for e in x.get("entries", [])
+                       if e.get("id", "").startswith(a.ref) and e["kind"] == "blocker"), (None, None))
+        if not e:
+            sys.exit("No question or blocker with id %s (see: needs)." % a.ref)
+        emit(root, sid="user", kind="unblock", title=clip(a.title, 200), body=clip(a.body, 4000), wid=wid, ref=e["id"], refSid=e["sid"])
+        ev, st = emit(root, sid="user", kind="msg", to=[e["sid"]], title="Unblocked: " + clip(a.title, 180), body=a.body,
+                      msgKind="fyi")
+        wake(st, ev)
+        print("unblocked %s; %s gets it now" % (e["id"], sname(st, e["sid"])))
+        return 0
+    if a.cmd == "digest":
+        rows = away_digest(st, now() - a.hours * 3600)
+        print("\n".join(rows) or "Nothing happened in the last %g h." % a.hours)
+        n = needs_user(st)
+        if n:
+            print("\n%d item%s wait for you: %s needs" % (len(n), "" if len(n) == 1 else "s", cli()))
+        return 0
+    if a.cmd in ("pause", "resume"):
+        if "CLAUDECODE" in os.environ and not user_said(root, sid, a.cmd, (), (a.cmd, "stop", "hold", "continue", "start")):
+            sys.exit("Refused: only the user pauses or resumes every session. Ask them.")
+        flag = os.path.join(bdir(root), "paused")
+        ev, st = emit(root, sid=sid, kind=a.cmd, title="The user %s every session" % ("paused" if a.cmd == "pause" else "resumed"),
+                      body=getattr(a, "why", ""))
+        if a.cmd == "pause":
+            open(flag, "w").close()
+        elif os.path.exists(flag):
+            os.remove(flag)
+        n_ = wake(st, dict(ev, to=["all"]), "[docket] The user paused every session%s. Finish the step you're on, write your "
+                  "brief, start nothing new, and stop." % (": " + a.why if getattr(a, "why", "") else "") if a.cmd == "pause" else
+                  "[docket] The user resumed every session. Continue from your brief and your task list.")
+        print("%s; told %d live session%s" % ("paused" if a.cmd == "pause" else "resumed", n_, "" if n_ == 1 else "s"))
+        return 0
+    if a.cmd == "relaunch":
+        rows = [x for x in st["sessions"].values() if x["id"] not in ("user", "manual") and not x.get("next")
+                and now() - x["last"] < 3 * 86400 and re.fullmatch(r"[0-9a-f-]{36}", x["id"])]
+        for x in sorted(rows, key=lambda x: -x["last"]):
+            print("# %s%s, last active %s" % (x["name"] or x["id"][:8], " (%s)" % x["work"] if x.get("work") else "", ago(x["last"])))
+            print("cd %s && claude --resume %s" % (shlex.quote(x.get("cwd") or root), x["id"]))
+        print("" if rows else "No sessions from the last 3 days.", end="\n" if not rows else "")
         return 0
     if a.cmd == "asks":
         rows = sorted(open_asks(st), key=ask_due)

@@ -40,6 +40,16 @@ not a soloist:
   agent is already doing that job. Ask for that result instead of producing it twice.
 - **Divide, delegate and agree.** Split the work by lane or work item, say who takes what, and
   hand independent pieces to agents. Disagree in messages, not in parallel code.
+- **Don't stop to ask the user.** Put the question in their queue and keep working on something
+  else: `$B msg user "<question, with the options>" --kind ask`. The user sees every session's
+  questions in one place (`needs`, the journal, the status line, a desktop notification). Their
+  `answer` comes back to you as mail and wakes you. Only stop when nothing else can move without the
+  answer.
+- **Stale tasks get an owner.** Every unowned, orphaned or stale task (`audit`) is assigned to one live
+  session: the one an ask went to, else a session on the item, else one picked so the load spreads.
+  When the Stop hook hands you your share, settle each before you go idle: resolve it with evidence,
+  adopt it, drop it with a reason, or message whoever owns it. Tasks a commit already seems to cover
+  are marked `DONE?`. Check them, and resolve them with that commit as evidence.
 - **Close the loop.** Report results to whoever is waiting on them. Resolve or drop the tasks you
   own, so nothing goes stale.
 

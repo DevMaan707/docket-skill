@@ -97,6 +97,13 @@ code,pre{font-family:var(--mono)}
 .files a{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--rule);border-radius:8px;padding:5px 10px;font:12.5px var(--mono);color:var(--ink2);text-decoration:none}
 .files a:hover{border-color:var(--rule2);color:var(--ink)}
 .files a span{font:11.5px var(--sans);color:var(--faint)}
+.sgoal.needs{border-left-color:var(--wait)}
+.sgoal.needs .k{color:var(--wait)}
+.sgoal.needs ol{margin:10px 0 0;padding-left:20px}
+.sgoal.needs li{margin:0 0 12px}
+.sgoal.needs .md{margin-top:2px;font-size:15px}
+.sgoal .ans{display:inline-block;margin-top:4px;font-size:12px;overflow-wrap:anywhere}
+.sgoal.paused{border-left-color:var(--muted)}
 .gstat{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:12px;margin:0 0 22px}
 .gstat .box{border:1px solid var(--rule);border-radius:12px;padding:12px 14px;background:var(--paper);min-width:0}
 .gstat .box .label{display:block;margin-bottom:6px}
@@ -528,7 +535,7 @@ function overview(){
   h+='<h1 class="masthead">Agent Journal</h1>';
   h+='<div class="dateline"><span>'+d.toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long",year:"numeric"})+'</span><span>'+list.length+' session'+(list.length===1?"":"s")+(B.updated?' · last word '+ago(B.updated):"")+'</span></div>';
   var rows=Object.values(B.index||{}), sum=function(k){ return rows.reduce(function(n,r){return n+(r[k]||0);},0); };
-  h+=directivesHtml()+goalHtml()+gateHtml();
+  h+=needsHtml()+directivesHtml()+goalHtml()+gateHtml();
   if(list.length) h+=tiles([
     {v:list.filter(function(s){return stateOf(s)==="working";}).length, k:"sessions writing now", tone:"live"},
     {v:list.filter(function(s){return stateOf(s)==="waiting";}).length, k:"waiting on you", tone:"wait"},
@@ -771,6 +778,17 @@ function goalHtml(){ var g=B.goal; if(!g||g.status==="cleared") return "";
   var met=g.status==="met", sw=(B.sessions||{}), who=function(id){ return sw[id]? esc(sname(sw[id])) : "session "+esc(String(id).slice(0,8)); };
   return '<section class="sgoal'+(met?" met":"")+'" aria-label="Standing goal"><div class="k">'+(met?"Goal met":"Standing goal from you")+(g.autonomous&&!met?chip("autonomous: sessions keep going","live"):"")+'</div>'+
     '<div class="md">'+md(g.text)+'</div>'+(!met&&g.thread?lanesHtml():'')+'<div class="f">Set '+ago(g.ts)+' via '+who(g.sid)+(met?' · marked met '+ago(g.endTs)+' by '+who(g.endBy)+(g.note?': '+esc(g.note):''):' · every session and agent gets it')+'</div></section>'; }
+function needsHtml(){
+  var now=Date.now()/1000, ms=B.msgs||[], out=[];
+  ms.forEach(function(m){ if(m.to.indexOf("user")>=0 && !ms.some(function(r){return r.re===m.id&&r.sid==="user";})) out.push({id:m.id, what:(m.kind==="ask"?"Question":"Note")+" from "+snameId(m.sid), title:m.title, body:m.body, ts:m.ts}); });
+  Object.values(B.sessions||{}).forEach(function(s){ (s.entries||[]).forEach(function(e){ if(e.kind==="blocker"&&!e.resolved&&!e.supersededBy&&now-e.ts<7*86400) out.push({id:e.id, what:"Blocker from "+sname(s), title:e.title, body:e.body||"", ts:e.ts}); }); });
+  var p=B.paused, h="";
+  if(p) h+='<section class="sgoal paused" aria-label="Paused"><div class="k">Every session is paused'+(p.why?' · '+esc(p.why):'')+'</div><div class="f">Since '+ago(p.ts)+'. Run <code>'+esc((B.cli||"docket.py")+" resume")+'</code> to start them again.</div></section>';
+  if(!out.length) return h;
+  out.sort(function(a,b){return a.ts-b.ts;});
+  return h+'<section class="sgoal needs" aria-label="Needs you"><div class="k">Needs you · '+out.length+'</div><ol>'+out.map(function(n){
+    return '<li><b>'+esc(n.what)+'</b> <span class="f">'+esc(n.id.slice(0,10))+' · '+ago(n.ts)+'</span><div class="md">'+inline(n.title)+'</div>'+
+      '<code class="ans">'+esc((B.cli||"docket.py")+" answer "+n.id.slice(0,10)+' "…"')+'</code></li>'; }).join("")+'</ol><div class="f">Answer from any terminal; it goes straight back to the session that asked, and wakes it.</div></section>'; }
 var draft={to:"all",kind:"fyi",text:""};
 function shq(t){ return "'"+String(t).replace(/'/g,"'\\''")+"'"; }
 function draftCmd(){ var t=draft.text.trim(); if(!t) return "";
@@ -807,7 +825,7 @@ function gateHtml(){
 function boardPage(){
   var all=B.msgs||[], posts=all.filter(function(m){return m.to.indexOf("board")>=0;}), dms=all.filter(function(m){return m.to.indexOf("board")<0;});
   var sy=B.sync, h='<div class="board"><div class="kick"><span class="label">Project board</span></div><h1 class="title">Board</h1>';
-  h+=directivesHtml()+goalHtml()+gateHtml()+composeHtml();
+  h+=needsHtml()+directivesHtml()+goalHtml()+gateHtml()+composeHtml();
   h+='<p class="lede">Notices every session reads, and what sessions told each other. Pinned posts are shown to each new session when it starts.</p>';
   h+='<div class="gitline">'+(sy&&sy.head? '<span class="ref">'+esc(sy.ref)+'</span><span>@ <span class="hash">'+esc(sy.head)+'</span></span><span>'+sy.events+' events in git</span><span>synced '+ago(sy.ts)+(sy.remote?' with '+esc(sy.remote):' (local only)')+'</span>' : '<span class="ref">refs/docket/log</span><span>Not in git yet. It syncs after each turn in a git repo, or run <code>docket.py sync</code>.</span>')+'</div>';
   var boardTab=/^#\/board\/messages/.test(location.hash)?"msgs":"board";

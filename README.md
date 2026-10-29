@@ -125,6 +125,25 @@ The journal's **Board** page shows pinned notices, threads and messages with rea
 - **Duplicate-agent warning:** it covers agents that finished in the last two hours too.
 - **Messages from you:** the Board page builds a `msg` command for you to copy and run.
 
+## For you, the person running the sessions
+
+- **One queue for what needs you:** questions sessions send with `msg user … --kind ask`, and their
+  blockers. You see them with `docket.py needs`, at the top of the journal, in the status line, as a
+  desktop notification, and in your next prompt in any session. `docket.py answer <id> "…"` sends the
+  reply back to the session that asked and wakes it.
+- **Back after a while:** your first prompt after 2+ hours starts with a recap of what every session
+  did. `docket.py digest --hours 8` prints the same.
+- **Pause and resume:** `docket.py pause --why "lunch"` tells every session to finish its step, write
+  its brief and stop; no new agents start. `docket.py resume` starts them again. Only you can do
+  either.
+- **Notifications:** a gate turning red, a goal target reached, a blocker, or a question for you
+  pops up on macOS (or through `notify-send`). `DOCKET_NOTIFY=off` turns them off.
+- **Status line:** `docket.py statusline` prints `docket: 2 need you · sast RED · held: box-1` for
+  Claude Code's status line. It prints nothing outside docket projects.
+- **Relaunch:** `docket.py relaunch` prints `cd … && claude --resume <id>` for every recent session.
+- **No forgotten tasks:** every stale or unowned task is assigned to one live session, which has to
+  settle it before it can go idle. Tasks a recent commit seems to cover are flagged `DONE?`.
+
 ## Protects the machine
 
 Many sessions, subagents and builds on one machine can exhaust memory and, once swap fills the

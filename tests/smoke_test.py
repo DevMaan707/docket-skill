@@ -29,6 +29,7 @@ def run(args, cwd, session=None, stdin=None, pid=None, agent=True, extra_env=Non
     env.update(extra_env or {})
     env.pop("DOCKET_ROOT", None)
     env.pop("CLAUDECODE", None)
+    env.setdefault("DOCKET_NOTIFY", "off")  # no desktop notifications from tests
     env.setdefault("DOCKET_LISTEN", "off")  # only the listener test turns the Stop-hook listener nudge on
     if agent:
         env["CLAUDECODE"] = "1"  # as if a Claude Code agent ran it
@@ -619,6 +620,80 @@ def main():
         ctx = hook(d, "PostToolUse", "sM2", tool_name="Bash", tool_input={"command": "ls"})
         check("a message from a terminal is from the user", "from You (from a terminal)" in ctx and "Freeze merges" in ctx, ctx[-400:])
 
+        # what waits for the user: one queue, answered once, routed back
+        run(["msg", "user", "Which region for the new DB: eu-west or ap-south?", "--kind", "ask"], d, "sM2")
+        run(["log", "blocker", "Need the Azure subscription id for staging"], d, "sM1")
+        code, out = run(["needs"], d, agent=False)
+        check("needs lists questions to the user and open blockers", "Which region" in out and "Azure subscription" in out, out)
+        ctx = hook(d, "UserPromptSubmit", "sM3", prompt="what's going on today")
+        check("any session tells the user what waits for them", "<docket-needs-you>" in ctx and "Which region" in ctx, ctx[-600:])
+        ctx = hook(d, "UserPromptSubmit", "sM3", prompt="ok and now")
+        check("...once, not on every prompt", "<docket-needs-you>" not in ctx, ctx[-300:])
+        qid = next(l.split("]")[0][1:] for l in out.splitlines() if "Which region" in l)
+        bid = next(l.split("]")[0][1:] for l in out.splitlines() if "Azure subscription" in l)
+        code, out = run(["answer", qid, "ap-south, for latency"], d, "sM1")
+        check("an agent can't answer for the user", code != 0, out)
+        run(["answer", qid, "ap-south, for latency"], d, agent=False)
+        run(["answer", bid, "It's in 1Password under staging-sub"], d, agent=False)
+        ctx = hook(d, "PostToolUse", "sM2", tool_name="Bash", tool_input={"command": "ls"})
+        check("the answer goes back to the session that asked", "ap-south, for latency" in ctx, ctx[-400:])
+        code, out = run(["needs"], d, agent=False)
+        check("answered questions and blockers leave the queue", "Which region" not in out and "Azure subscription" not in out, out)
+
+        # back after a while: a digest of what everyone did
+        evp = os.path.join(d, ".docket", "events.jsonl")
+        with open(evp, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "away0001", "sid": "sAway", "agent": "main", "kind": "prompt", "title": "x", "body": "x",
+                                "ts": time.time() - 5 * 3600}) + "\n")
+        run(["rebuild"], d)
+        ctx = hook(d, "UserPromptSubmit", "sAway", prompt="morning, where are we")
+        check("a user back after hours gets a digest of every session", "<docket-digest>" in ctx and "Gate speed" in ctx, ctx[:1500])
+        code, out = run(["digest", "--hours", "1"], d)
+        check("digest works from the terminal", "Gate speed" in out, out)
+
+        # pause and resume every session
+        code, out = run(["pause"], d, "sM1")
+        check("an agent can't pause every session on its own", code != 0 and "Refused" in out, out)
+        code, out = run(["pause", "--why", "going to sleep"], d, agent=False)
+        check("the user can pause every session", code == 0 and "paused" in out, out)
+        out = run(["hook"], d, stdin=json.dumps(dict(hook_event_name="PreToolUse", session_id="sM1", cwd=d, tool_name="Agent",
+                                                     tool_input={"description": "x", "prompt": "y"})),
+                  extra_env=dict(DOCKET_MEM_GUARD="off"))[1]
+        check("while paused, no new agents start", '"deny"' in out and "paused" in out, out)
+        code, out = run(["statusline"], d, stdin=json.dumps({"session_id": "sM1"}))
+        check("the status line shows the state at a glance", out.startswith("docket:") and "PAUSED" in out and "sast RED" in out, out)
+        run(["resume"], d, agent=False)
+        out = run(["hook"], d, stdin=json.dumps(dict(hook_event_name="PreToolUse", session_id="sM1", cwd=d, tool_name="Agent",
+                                                     tool_input={"description": "x", "prompt": "y"})),
+                  extra_env=dict(DOCKET_MEM_GUARD="off"))[1]
+        check("resume lifts it", "paused" not in out, out)
+
+        # relaunch: one command per recent session
+        uid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+        hook(d, "SessionStart", uid)
+        code, out = run(["relaunch"], d)
+        check("relaunch prints the resume command for each recent session", "claude --resume " + uid in out, out)
+
+        # stale tasks are assigned and must be settled before going idle
+        hook(d, "SessionStart", "sOld"); hook(d, "UserPromptSubmit", "sOld", prompt="ship the exporter please")
+        run(["work", "new", "CSV exporter", "-k", "csv,exporter", "--top-level"], d, "sOld")
+        run(["log", "brief", "Exporter", "--now", "half done", "--next", "write the streaming writer; add exporter tests"], d, "sOld")
+        hook(d, "SessionEnd", "sOld")
+        st_ = json.load(open(os.path.join(d, ".docket", "state.json")))
+        live = [k for k, v in st_["sessions"].items() if v["status"] != "ended" and k not in ("user", "manual")]
+        for k in live:  # deliver pending mail and directives first; those come before the sweep
+            hook(d, "PostToolUse", k, tool_name="Bash", tool_input={"command": "ls"})
+        outs = [run(["hook"], d, stdin=json.dumps(dict(hook_event_name="Stop", session_id=k, cwd=d)),
+                    extra_env=dict(DOCKET_LISTEN="on"))[1] for k in live]
+        hit = [o for o in outs if "settle these stale" in o and "streaming writer" in o]
+        check("a forgotten task is assigned to exactly one live session, which must settle it", len(hit) == 1,
+              "\n".join(o[:200] for o in outs))
+        from importlib import util as iu2
+        spec2 = iu2.spec_from_file_location("dk2", DOCKET); dk2 = iu2.module_from_spec(spec2); spec2.loader.exec_module(dk2)
+        dk2._GITLOG["/repo"] = (time.time(), [("abc1234", "Rotate signing keys for the auth service", time.time())])
+        check("a commit that matches a task flags it as probably done",
+              (dk2.maybe_done({"root": "/repo"}, {"subject": "Rotate signing keys", "ts": 0}) or "").startswith("abc1234"))
+
         # /clear: same Claude process, new session id -> it carries on as the old session
         hook(d, "SessionStart", "sClr1", pid=4242001)
         hook(d, "UserPromptSubmit", "sClr1", pid=4242001, prompt="tune the cache layer please")
@@ -638,7 +713,7 @@ def main():
         check("a different process doesn't inherit it", "<docket-resume>" not in ctx, ctx[-300:])
 
         # idle sessions: a background listener wakes them when mail arrives
-        on = dict(DOCKET_LISTEN="on")
+        on = dict(DOCKET_LISTEN="on", DOCKET_SWEEP="off")
         stopL = lambda sid, **kw: run(["hook"], d, stdin=json.dumps(dict(hook_event_name="Stop", session_id=sid,
                                                                           cwd=d, **kw)), extra_env=on)[1]
         hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})
