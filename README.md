@@ -106,6 +106,14 @@ through hooks with no server:
 
 The journal's **Board** page shows pinned notices, threads and messages with read receipts.
 
+## Protects the machine
+
+Many sessions, subagents and builds on one machine can exhaust memory and, once swap fills the
+disk, force a restart. Before every shell command and agent spawn docket checks memory pressure
+and free disk. When it's critical, new agents and heavy commands are refused (freeing memory
+still works) and every session is told. When it's tight, heavy jobs get a warning and new
+subagents are capped at about one per 2 GB of RAM. `docket.py mem` shows the biggest processes.
+
 ## A standing goal, divided between sessions
 
 `docket.py goal set "<the user's words>" --autonomous` gives every session and agent the user's

@@ -59,6 +59,23 @@ except ValueError:
 AUTONOMY_WORDS = ("permission", "autonomous", "keep working", "keep going", "don't stop", "dont stop",
                   "without asking", "don't wait", "dnt wait", "dont wait", "until")
 STALE_HOURS = 24
+
+
+def _envnum(k, d):
+    try:
+        return float(os.environ.get(k, d))
+    except ValueError:
+        return float(d)
+
+
+MEM_WARN, MEM_CRIT = _envnum("DOCKET_MEM_WARN", 20), _envnum("DOCKET_MEM_CRIT", 10)  # % of RAM available
+DISK_WARN, DISK_CRIT = _envnum("DOCKET_DISK_WARN_GB", 10), _envnum("DOCKET_DISK_CRIT_GB", 3)  # swap lives on disk
+RELIEF = re.compile(r"^\s*(?:sudo\s+)?(?:kill|pkill|killall|ps|top|htop|pgrep|free|vm_stat|memory_pressure|sysctl|"
+                    r"df|du|uptime|jobs|wait|rm|ls|cat|head|tail|grep|wc|echo|docker\s+(?:stop|kill|rm|ps|system\s+prune)|"
+                    r"git\s+(?:status|log|diff|add|commit|push|stash)|\S*python3?\s+\S*docket\.py)\b")
+HEAVY = re.compile(r"\b(?:make|cmake|ninja|go\s+(?:build|test|run|vet)|cargo|rustc|mvn|gradlew?|javac|npm|pnpm|yarn|"
+                   r"bun|tsc|webpack|vite|jest|vitest|pytest|docker|podman|bazel|clang|gcc|g\+\+|xcodebuild|swift\s+build|"
+                   r"semgrep|codeql|dependency-check)\b|\.sh\b")
 CHARTER = """How to work under it (autonomous mode, set by the user):
 - Coordinate first, then divide. Read the goal thread (board) and the lanes (lanes). Reply on the
   thread with what you propose to own and why, and any doubts about the goal or the others'
@@ -82,6 +99,11 @@ CHARTER = """How to work under it (autonomous mode, set by the user):
   result before you claim it. Report measured numbers, not impressions.
 - Measure on inputs you didn't tune on (held-out or unseen data, repos, cases). A gain that only shows
   on what you tuned against doesn't count.
+- Protect the machine: lag is fine, a crash or forced shutdown is not. Check memory and disk before a
+  heavy job (docket.py mem); run at most one heavy build, test run or scan per machine at a time; cap
+  its memory and parallelism (-j2, GOMAXPROCS, -Xmx, NODE_OPTIONS=--max-old-space-size, cargo -j);
+  send big scans to remote boxes; kill background jobs and agents you no longer need. When docket
+  says memory or disk is critical, start nothing new and free memory first.
 - Never sit idle. Don't block on fixed sleeps or poll loops: run long jobs (builds, gates, scans) in
   the background, keep working in your lane, and act when they finish. Post shared notices (a busy
   machine, a broken baseline) before you wait, not after.
@@ -1438,7 +1460,17 @@ def handle_hook(inp):
                goal_block(st, full=False) if seen else None, deliver(root, sid, st)]
         hook_output(event, "\n".join(x for x in ctx if x))
 
-    elif event == "PreToolUse" and inp.get("tool_name") in EDIT_TOOLS:
+    elif event == "PreToolUse" and inp.get("tool_name") in ("Bash", "Agent", "Task"):
+        deny, warn = mem_guard(root, sid, who, inp.get("tool_name"), inp.get("tool_input") or {})
+        if deny:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
+                                                     "permissionDecisionReason": deny}}))
+            return
+        if warn:
+            hook_output(event, warn)
+        if inp.get("tool_name") == "Bash":
+            return
+    if event == "PreToolUse" and inp.get("tool_name") in EDIT_TOOLS:
         mode = os.environ.get("DOCKET_LEASES", "block")
         ti = inp.get("tool_input") or {}
         p = rel(root, ti.get("file_path") or ti.get("notebook_path"))
@@ -1769,6 +1801,8 @@ def keep_going(st, sid):
     if any(e["kind"] == "blocker" and not e.get("resolved") and e["ts"] >= s.get("promptTs", 0)
            for e in s.get("entries", [])):
         return None  # it logged a real blocker this turn
+    if memory(st.get("root") or "/")["level"] == "critical":
+        return None  # let it stop: more work now risks the machine
     if s.get("continues", 0) >= GOAL_MAX_CONTINUES:
         return None  # ponytail: a fixed cap stops runaway loops; raise DOCKET_GOAL_MAX_CONTINUES for longer runs
     c = cli()
@@ -1784,6 +1818,114 @@ def keep_going(st, sid):
             "didn't tune on, commit and merge what's finished. If you are truly blocked, log it (%s log blocker "
             "\"...\") and stop. If the goal is met, run %s goal met -b \"<evidence>\". (Continuation %d of %d.)"
             % (clip(" ".join(g["text"].split()), 200), c, c, c, c, s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
+
+
+def memory(root="/"):
+    """Machine headroom: {'level': normal|warn|critical, 'why': [...], 'total', 'avail', 'disk'}.
+    One cheap call per platform: the hook runs it before every shell command and agent spawn."""
+    m = {"level": "normal", "why": [], "total": None, "avail": None, "disk": None}
+    rank = {"normal": 0, "warn": 1, "critical": 2}
+
+    def bump(level, why):
+        m["why"].append(why)
+        if rank[level] > rank[m["level"]]:
+            m["level"] = level
+    try:
+        if sys.platform == "darwin":
+            out = subprocess.run(["sysctl", "-n", "hw.memsize", "kern.memorystatus_vm_pressure_level"],
+                                 capture_output=True, text=True, timeout=2).stdout.split()
+            m["total"], lvl = int(out[0]), int(out[1])  # the kernel's own verdict: 1 normal, 2 warn, 4 critical
+            if lvl >= 4:
+                bump("critical", "kernel memory pressure is critical")
+            elif lvl == 2:
+                bump("warn", "kernel memory pressure is elevated")
+        elif os.path.exists("/proc/meminfo"):
+            with open("/proc/meminfo") as f:
+                mi = {l.split(":")[0]: int(l.split()[1]) * 1024 for l in f if l.split()[1:2]}
+            m["total"], m["avail"] = mi.get("MemTotal"), mi.get("MemAvailable")
+        elif os.name == "nt":
+            import ctypes
+
+            class MS(ctypes.Structure):
+                _fields_ = [("len", ctypes.c_ulong), ("load", ctypes.c_ulong)] + \
+                           [(n, ctypes.c_ulonglong) for n in ("tot", "av", "tp", "ap", "tv", "avv", "ext")]
+            x = MS()
+            x.len = ctypes.sizeof(MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(x))
+            m["total"], m["avail"] = x.tot, x.av
+    except Exception:
+        pass
+    if m["total"] and m["avail"] is not None:
+        pct = 100.0 * m["avail"] / m["total"]
+        if pct < MEM_CRIT:
+            bump("critical", "only %.0f%% of RAM available" % pct)
+        elif pct < MEM_WARN:
+            bump("warn", "only %.0f%% of RAM available" % pct)
+    try:
+        m["disk"] = shutil.disk_usage(root).free / 1e9
+        if m["disk"] < DISK_CRIT:
+            bump("critical", "only %.1f GB disk free (swap needs disk)" % m["disk"])
+        elif m["disk"] < DISK_WARN:
+            bump("warn", "only %.1f GB disk free (swap needs disk)" % m["disk"])
+    except OSError:
+        pass
+    return m
+
+
+def host_agents(st):
+    """Subagents running right now in live sessions on this machine."""
+    host = socket.gethostname()
+    return sum(1 for x in st["sessions"].values() if x.get("host") == host and is_live(x)
+               for a in x["agents"].values() if a["status"] == "running" and now() - a["last"] < LIVE_SECS)
+
+
+def max_agents(m):
+    return int(_envnum("DOCKET_MAX_AGENTS", max(2, (m["total"] or 8 << 30) // (2 << 30))))  # ~1 per 2 GB RAM
+
+
+def mem_guard(root, sid, who, tool, ti):
+    """PreToolUse: refuse new load when the machine is out of headroom. Returns (deny reason, warning)."""
+    if os.environ.get("DOCKET_MEM_GUARD") == "off":
+        return None, None
+    m = memory(root)
+    if m["level"] == "normal":
+        return None, None
+    why = "; ".join(m["why"])
+    cmd = (ti.get("command") or "") if tool == "Bash" else ""
+    if m["level"] == "critical":
+        note_critical(root, sid, who, why)
+        if tool in ("Agent", "Task") or not RELIEF.match(cmd):
+            return ("This machine is close to running out of memory (%s). Lag is acceptable, a forced shutdown is "
+                    "not, so new work is refused until it recovers. Free memory first: stop background jobs and "
+                    "agents you don't need (%s mem shows the biggest processes), wait for running builds, then "
+                    "retry. Reading files and kill/ps/docker stop/rm still work." % (why, cli())), None
+        return None, None
+    if tool in ("Agent", "Task"):
+        st = load_state(root)
+        n, cap = host_agents(st), max_agents(m)
+        if n >= cap:
+            return ("Memory is tight on this machine (%s) and %d subagents are already running here (limit %d). "
+                    "Wait for one to finish, or do this step yourself." % (why, n, cap)), None
+    if HEAVY.search(cmd):
+        return None, ("<docket-warning>Memory is tight on this machine (%s). Before this heavy job: make sure no "
+                      "other heavy build or scan is running here, cap its parallelism and memory, and run it in "
+                      "the background. Lag is fine; running out of memory is not.</docket-warning>" % why)
+    return None, None
+
+
+def note_critical(root, sid, who, why):
+    """Tell every session once per 30 minutes, so they all stop adding load."""
+    p = os.path.join(bdir(root), "mem.stamp")
+    try:
+        if now() - os.path.getmtime(p) < 1800:
+            return
+    except OSError:
+        pass
+    with open(p, "w") as f:
+        f.write(why)
+    emit(root, sid=sid, agent=who, kind="msg", to=["board", "all"], title="Memory critical on %s" % socket.gethostname(),
+         body="%s. Start nothing new on this machine; stop background jobs and agents you don't need. "
+              "Lag is fine, a forced shutdown is not." % why)
 
 
 def mail_waiting(root, sid):
@@ -2156,6 +2298,7 @@ def main():
     ln.add_argument("-b", "--body", default="", help="take: the scope, what's in and out")
     ln.add_argument("--session", **sess)
     sub.add_parser("lanes", help="who owns which part of the goal")
+    sub.add_parser("mem", help="memory, disk and the biggest processes on this machine")
     sub.add_parser("audit", help="tasks to check: not done, stale, done without evidence, items to close")
     gl = sub.add_parser("goal", help="the user's standing goal for every session: show, set, met, clear")
     gl.add_argument("action", nargs="?", default="show", choices=["show", "set", "met", "clear"])
@@ -2315,6 +2458,24 @@ def main():
                                        "".join("\n  attached %s (%s)" % (f["path"], attach_note(f)) for f in ev.get("files", []))))
         if ev.get("wids"):
             print("  tracked as pending task A-%s on %s" % (mid[:6], ", ".join(ev["wids"])))
+        return 0
+    if a.cmd == "mem":
+        m = memory(root)
+        print("%s%s" % (m["level"].upper(), ": " + "; ".join(m["why"]) if m["why"] else ""))
+        if m["total"]:
+            print("RAM %.1f GB%s" % (m["total"] / 1e9, ", %.1f GB available" % (m["avail"] / 1e9) if m["avail"] else ""))
+        if m["disk"] is not None:
+            print("Disk free %.1f GB" % m["disk"])
+        print("Subagents running on this machine: %d (limit when memory is tight: %d)" % (host_agents(st), max_agents(m)))
+        try:
+            ps = subprocess.run(["ps", "-axo", "pid=,rss=,command="], capture_output=True, text=True, timeout=5).stdout
+            rows = sorted((l.split(None, 2) for l in ps.splitlines() if len(l.split(None, 2)) == 3),
+                          key=lambda r: -int(r[1]))[:10]
+            print("\nBiggest processes (pid, MB, command):")
+            for pid, rss, c_ in rows:
+                print("  %-7s %6d  %s" % (pid, int(rss) // 1024, c_[:110]))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
         return 0
     if a.cmd == "audit":
         rows = audit(st)

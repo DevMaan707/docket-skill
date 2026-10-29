@@ -21,8 +21,8 @@ DOCKET = os.path.join(HERE, "..", "scripts", "docket.py")
 FAILS = []
 
 
-def run(args, cwd, session=None, stdin=None, pid=None, agent=True):
-    env = dict(os.environ)
+def run(args, cwd, session=None, stdin=None, pid=None, agent=True, extra_env=None):
+    env = dict(os.environ, **(extra_env or {}))
     env.pop("DOCKET_ROOT", None)
     env.pop("CLAUDECODE", None)
     if agent:
@@ -399,6 +399,28 @@ def main():
         run(["goal", "clear"], d, "sM1")
         check("the user can clear it through their own prompt", "No standing goal" in run(["goal"], d)[1]
               or "cleared" in run(["goal"], d)[1])
+
+        # memory guard: lag is fine, a forced shutdown is not
+        def pre(tool, ti, **env):
+            out = run(["hook"], d, stdin=json.dumps(dict(hook_event_name="PreToolUse", session_id="sM1", cwd=d,
+                                                         tool_name=tool, tool_input=ti)), extra_env=env)[1]
+            return out
+        crit = dict(DOCKET_DISK_CRIT_GB="1e9")
+        check("critical memory refuses a heavy build", '"deny"' in pre("Bash", {"command": "make -j8 all"}, **crit))
+        check("critical memory still allows freeing it", "deny" not in pre("Bash", {"command": "kill 4242"}, **crit))
+        check("critical memory refuses new agents", '"deny"' in pre("Agent", {"description": "x", "prompt": "y"}, **crit))
+        ctx = hook(d, "PostToolUse", "sM2", tool_name="Bash", tool_input={"command": "ls"})
+        check("every session is told memory is critical", "Memory critical" in ctx, ctx)
+        warn = dict(DOCKET_DISK_CRIT_GB="0", DOCKET_DISK_WARN_GB="1e9")
+        check("tight memory warns before a heavy job", "Memory is tight" in pre("Bash", {"command": "go test ./..."}, **warn))
+        check("tight memory allows light commands silently", pre("Bash", {"command": "ls"}, **warn).strip() == "")
+        check("tight memory caps subagents per machine",
+              '"deny"' in pre("Agent", {"description": "x", "prompt": "y"}, DOCKET_MAX_AGENTS="0", **warn))
+        check("normal memory allows everything",
+              pre("Bash", {"command": "make"}, DOCKET_DISK_CRIT_GB="0", DOCKET_DISK_WARN_GB="0").strip() == ""
+              or "deny" not in pre("Bash", {"command": "make"}, DOCKET_DISK_CRIT_GB="0", DOCKET_DISK_WARN_GB="0"))
+        code, out = run(["mem"], d)
+        check("mem shows headroom and the biggest processes", code == 0 and "Biggest processes" in out, out)
 
         before = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
         run(["rebuild"], d)
