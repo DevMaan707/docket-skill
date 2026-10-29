@@ -106,6 +106,24 @@ through hooks with no server:
 
 The journal's **Board** page shows pinned notices, threads and messages with read receipts.
 
+## A standing goal, divided between sessions
+
+`docket.py goal set "<the user's words>" --autonomous` gives every session and agent the user's
+goal, plus working rules:
+
+- **Coordinate:** agree a split on the goal thread, then each session takes one lane.
+- **Decide:** don't wait for permission.
+- **Delegate:** spawn subagents inside your lane.
+- **Doubt:** critique plans and results, and measure on inputs you didn't tune on.
+- **Report:** update each other with numbers.
+- **Audit:** check tasks regularly.
+- **Ship:** commit and merge.
+
+The goal must come from a prompt the user actually typed. Sessions holding a lane are kept working by the Stop hook until the goal is
+met or they log a real blocker (capped at 10 turns in a row). `audit` lists tasks nobody owns,
+stale ones, ones marked done without evidence, and items whose tasks are all finished; `reopen`
+puts back a task that was marked done but isn't.
+
 ## The record is in git
 
 Like [git-bug](https://github.com/git-bug/git-bug) and GitLoom, the record lives in git:

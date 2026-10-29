@@ -21,9 +21,12 @@ DOCKET = os.path.join(HERE, "..", "scripts", "docket.py")
 FAILS = []
 
 
-def run(args, cwd, session=None, stdin=None, pid=None):
+def run(args, cwd, session=None, stdin=None, pid=None, agent=True):
     env = dict(os.environ)
     env.pop("DOCKET_ROOT", None)
+    env.pop("CLAUDECODE", None)
+    if agent:
+        env["CLAUDECODE"] = "1"  # as if a Claude Code agent ran it
     env["CLAUDE_PID"] = str(pid or os.getpid())  # sessions "run" in this live test process
     if session:
         env["DOCKET_SESSION"] = session
@@ -345,6 +348,57 @@ def main():
         tail = open(next(os.path.join(r, n) for r, _, fs in os.walk(kept) for n in fs)).read()
         check("the owner gets the ask with the log, tail kept",
               "ASKS YOU TO ACT" in ctx and "build.log" in ctx and "last" in ctx and tail.endswith("took 412s\n"), ctx)
+
+        # the user's standing goal, autonomous mode
+        code, out = run(["goal", "set", "Rewrite everything in Haskell", "--autonomous"], d, "sM1")
+        check("an agent can't invent a standing goal", code != 0 and "Refused" in out, out)
+        hook(d, "UserPromptSubmit", "sM1", prompt="make the parsers precise and fast please")
+        code, out = run(["goal", "set", "Make the parsers precise and fast", "--autonomous"], d, "sM1")
+        check("--autonomous needs the user to have asked for it", code != 0 and "autonomous" in out, out)
+        hook(d, "UserPromptSubmit", "sM1", prompt="keep working until parsers are precise and fast, don't wait "
+                                                   "for my permission, delegate work, clear the old goal")
+        code, out = run(["goal", "set", "Keep working until parsers are precise and fast; don't wait for "
+                         "permission; delegate work", "--autonomous"], d, "sM1")
+        check("a goal in the user's own words is set", code == 0 and "autonomous" in out, out)
+        ctx = hook(d, "PostToolUse", "sM2", tool_name="Bash", tool_input={"command": "ls"})
+        check("a live session gets the goal, the charter and the thread mid-turn",
+              "parsers are precise" in ctx and "Coordinate first" in ctx and "Goal thread" in ctx, ctx)
+        ctx = hook(d, "UserPromptSubmit", "sM2", prompt="carry on please now")
+        check("later prompts get a one-line reminder", "<docket-goal>Standing goal" in ctx and "Coordinate" not in ctx, ctx)
+        stop = lambda sid: run(["hook"], d, stdin=json.dumps(dict(hook_event_name="Stop", session_id=sid, cwd=d)))[1]
+        check("a session on other work isn't driven by the goal", "decision" not in stop("sM2"))
+        out = stop("sM1")
+        check("the goal's own session is told to coordinate and take a lane", '"decision": "block"' in out and "lane" in out, out)
+        run(["lane", "take", "Speed", "-b", "build and gate time"], d, "sM1")
+        code, out = run(["lane", "take", "speed"], d, "sM2")
+        check("a lane another live session holds is refused", code != 0 and "Agree a split" in out, out)
+        code, out = run(["lane", "take", "Precision", "-b", "false positives"], d, "sM2")
+        ctx = hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})
+        check("taking a lane is announced to every session", "Taking lane: Precision" in ctx, ctx)
+        out = stop("sM2")
+        check("a session with a lane keeps going", '"decision": "block"' in out and "audit" in out, out)
+        run(["log", "blocker", "Need the user's cloud credentials"], d, "sM2")
+        check("a logged blocker lets it stop", "decision" not in stop("sM2"))
+        code, out = run(["goal", "clear"], d, "sM2")
+        check("an agent can't clear the user's goal", code != 0 and "Refused" in out, out)
+        code, out = run(["audit"], d)
+        check("audit lists tasks nobody owns", "NOT DONE" in out, out)
+        pid = next(l.split()[1] for l in out.splitlines() if "NOT DONE" in l)
+        run(["resolve", pid], d, "sM1")
+        code, out = run(["audit"], d)
+        check("audit flags done-without-evidence", pid in out and "UNVERIFIED" in out, out)
+        run(["reopen", pid, "--reason", "the test still fails"], d, "sM1")
+        code, out = run(["audit"], d)
+        check("a reopened task is not done again", any(pid in l and "NOT DONE" in l for l in out.splitlines()), out)
+        code, out = run(["goal", "met"], d, "sM1")
+        check("goal met needs evidence", code != 0, out)
+        run(["goal", "met", "-b", "precision 99.1% on 12 unseen repos"], d, "sM1")
+        check("a met goal stops keeping sessions going", "decision" not in stop("sM1"))
+        code, out = run(["goal", "set", "From the terminal"], d, agent=False)
+        check("the user can set a goal from a terminal", code == 0, out)
+        run(["goal", "clear"], d, "sM1")
+        check("the user can clear it through their own prompt", "No standing goal" in run(["goal"], d)[1]
+              or "cleared" in run(["goal"], d)[1])
 
         before = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
         run(["rebuild"], d)

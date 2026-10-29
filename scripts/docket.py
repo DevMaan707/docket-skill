@@ -52,6 +52,40 @@ TOUCH_KEEP = 200     # per work item: recent writers, for --expect checks
 FACT_AGE_DAYS = 7
 MAX_MSGS = 2000
 ATTACH_MAX = 1000000  # bytes kept per attached file; logs keep their tail
+try:
+    GOAL_MAX_CONTINUES = max(1, min(50, int(os.environ.get("DOCKET_GOAL_MAX_CONTINUES", "10"))))
+except ValueError:
+    GOAL_MAX_CONTINUES = 10
+AUTONOMY_WORDS = ("permission", "autonomous", "keep working", "keep going", "don't stop", "dont stop",
+                  "without asking", "don't wait", "dnt wait", "dont wait", "until")
+STALE_HOURS = 24
+CHARTER = """How to work under it (autonomous mode, set by the user):
+- Coordinate first, then divide. Read the goal thread (board) and the lanes (lanes). Reply on the
+  thread with what you propose to own and why, and any doubts about the goal or the others'
+  proposals. Settle disagreements on the thread, then take your lane (lane take "<area>" -b "<scope>").
+  Don't work outside your lane: send findings and asks to the lane's owner instead. One lane each;
+  if every lane is taken, review or verify another lane's results.
+- Audit the tasks. At the start and after each milestone run audit: for every task it lists, check
+  the code. Done but not marked -> resolve it with the evidence; marked done but not actually done ->
+  reopen it with what's missing; not done -> do it if it's in your lane, otherwise tell the lane owner.
+- Keep each other updated. Reply on the goal thread at every milestone with measured numbers, what
+  changed, and what's next; read others' updates before you plan your next step.
+- Don't wait for the user's permission on decisions inside this goal. Decide, log the decision with the
+  options you rejected, and keep going. Stop only for a real blocker (missing access or credentials, a
+  destructive or irreversible step the goal doesn't cover): log it as a blocker so others see it.
+- Delegate and organise. Split the goal into work items (work new --parent), spawn subagents for
+  independent pieces (fixes, investigations, reviews) and run them in parallel. Check the board and
+  live sessions (who) first so no two sessions do the same piece; claim what you take.
+- Talk to each other. Post what everyone should know on the board; message the owner of an area
+  (msg --about "<topic>" --kind fyi|finding|ask --attach <log>); answer asks sent to you.
+- Doubt your own work. Have a fresh-context agent critique each plan before you build it and each
+  result before you claim it. Report measured numbers, not impressions.
+- Measure on inputs you didn't tune on (held-out or unseen data, repos, cases). A gain that only shows
+  on what you tuned against doesn't count.
+- Finish the loop: test, commit and merge finished work through the project's normal flow, and log a
+  fact with the evidence.
+- The goal doesn't authorise force-pushes, history rewrites, deleting data or production changes
+  unless it names them."""
 MSG_KINDS = {"fyi": "FYI", "finding": "FINDING (verify before acting)", "ask": "ASKS YOU TO ACT"}
 SYNC_REF = "refs/docket/log"  # the record's git history, kept off every branch
 ENTRY_KINDS = ["plan", "decision", "status", "blocker", "unblock", "done", "summary",
@@ -405,7 +439,9 @@ def pending_items(st, wid):
     for k in order:
         it = groups[k]
         ov = next((over[p] for p in [it["pid"]] + [c["pid"] for c in it["copies"]] if p in over), None)
-        if ov and ov["status"] in ("done", "dropped"):
+        if ov and ov["status"] == "reopened":  # someone checked: it isn't actually done
+            it.update(status="open", by=None, reason="reopened: " + ov.get("reason", ""))
+        elif ov and ov["status"] in ("done", "dropped"):
             it.update(status=ov["status"], by=ov["by"], reason=ov.get("reason", ""))
         elif k in done_subj:
             it.update(status="done", by=None, reason="completed on a task list")
@@ -420,6 +456,32 @@ def pending_items(st, wid):
         else:
             it.update(status="open", by=None, reason="")
         out.append(it)
+    return out
+
+
+def audit(st):
+    """Tasks that need a look: unowned or long-running, done without evidence, items whose tasks
+    are all finished but still open, and open items nobody has touched in days."""
+    out = []
+    for w in sorted(st["work"].values(), key=lambda w: w["id"]):
+        if w["status"] != "open":
+            continue
+        pend = pending_items(st, w["id"])
+        for i in pend:
+            hrs = (now() - i["ts"]) / 3600
+            if i["status"] == "open":
+                out.append((w["id"], i["pid"], "NOT DONE", "%s; nobody owns it%s" % (
+                    i["subject"], ", for %d h" % hrs if hrs >= 1 else "")))
+            elif i["status"] in ("active", "adopted") and hrs >= STALE_HOURS:
+                out.append((w["id"], i["pid"], "STALE", "%s; %s by %s for %d h: still going, done, or abandoned?" % (
+                    i["subject"], i["status"], sname(st, i["by"]) if i.get("by") else "?", hrs)))
+            elif i["status"] == "done" and not i.get("reason"):
+                out.append((w["id"], i["pid"], "UNVERIFIED", "%s; marked done with no evidence: check it" % i["subject"]))
+        if pend and all(i["status"] in ("done", "dropped") for i in pend):
+            out.append((w["id"], "-", "CLOSE?", "every task is done or dropped but the item is open"))
+        elif not live_sessions(st, w["id"]) and now() - w["updated"] > 3 * 86400:
+            out.append((w["id"], "-", "STALE ITEM", "no activity for %d days and nobody live on it"
+                        % ((now() - w["updated"]) // 86400)))
     return out
 
 
@@ -545,7 +607,24 @@ def apply(st, ev):
     elif kind == "name":
         s["name"] = title
     elif kind == "prompt":
-        s["prompt"], s["status"] = body, "working"
+        s["prompt"], s["status"], s["promptTs"], s["continues"] = body, "working", ts, 0
+    elif kind == "goal_set":
+        st["goal"] = {"id": ev["id"], "text": body, "ts": ts, "sid": sid, "status": "active",
+                      "autonomous": bool(ev.get("autonomous")), "note": "", "thread": ev.get("thread")}
+        st["lanes"] = {}
+    elif kind == "lane":
+        key = _norm(title) or title.lower()
+        if ev.get("drop"):
+            st.get("lanes", {}).pop(key, None)
+        else:
+            st.setdefault("lanes", {})[key] = {"name": title, "scope": body, "sid": sid, "ts": ts}
+    elif kind in ("goal_met", "goal_clear"):
+        if st.get("goal"):
+            st["goal"].update(status="met" if kind == "goal_met" else "cleared", note=body, endTs=ts, endBy=sid)
+    elif kind == "goal_seen":
+        s["goalSeen"] = ev.get("ref")
+    elif kind == "goal_continue":
+        s["continues"] = s.get("continues", 0) + 1
     elif kind == "turn_end":
         s["status"] = "idle"
     elif kind == "session_end":
@@ -789,7 +868,7 @@ def emit(root, _guard=None, **ev):
             _append(root, st, dict(ts=ev["ts"], id=uuid.uuid4().hex[:10], agent="main", sid=x["id"],
                                    kind="session_end", title="Session ended (process exited)"))
         _append(root, st, ev)
-        if ev["kind"] == "msg":  # lets hooks spot new mail without loading state
+        if ev["kind"] in ("msg", "goal_set"):  # lets hooks spot new mail without loading state
             with open(os.path.join(bdir(root), "mail.stamp"), "w") as f:
                 f.write(ev["id"])
         s = st["sessions"].get(ev["sid"], {})
@@ -1340,15 +1419,20 @@ def handle_hook(inp):
         _, st = emit(root, kind="session_start", title="Session " + inp.get("source", "start"),
              name=os.environ.get("DOCKET_NAME", ""), pid=claude_pid(), host=socket.gethostname(), **E)
         digest = None if st["sessions"].get(sid, {}).get("work") else open_work_digest(root, st, sid)
-        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), pinned_block(st), digest) if x))
+        g = goal_block(st)
+        if g:
+            emit(root, kind="goal_seen", ref=st["goal"]["id"], title="Read the standing goal", **E)
+        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), g, pinned_block(st), digest) if x))
         sync_later(root)  # pull what other machines pushed
 
     elif event == "UserPromptSubmit":
         prompt = inp.get("prompt") or ""
-        _, st = emit(root, kind="prompt", title=clip(prompt, 120), body=clip(prompt, 600),
+        _, st = emit(root, kind="prompt", title=clip(prompt, 120), body=clip(prompt, 8000),
                      pid=claude_pid(), host=socket.gethostname(), **E)
         mail_waiting(root, sid)  # mark checked; the mail itself goes out below
-        ctx = [prior_work_block(root, st, sid, prompt) if prompt.strip() else None, deliver_mail(root, sid, st)]
+        seen = st.get("goal") and st["sessions"][sid].get("goalSeen") == st["goal"]["id"]
+        ctx = [prior_work_block(root, st, sid, prompt) if prompt.strip() else None,
+               goal_block(st, full=False) if seen else None, deliver(root, sid, st)]
         hook_output(event, "\n".join(x for x in ctx if x))
 
     elif event == "PreToolUse" and inp.get("tool_name") in EDIT_TOOLS:
@@ -1430,14 +1514,15 @@ def handle_hook(inp):
             plan = ti.get("plan") or ""
             first = next((l.strip("# ").strip() for l in plan.splitlines() if l.strip()), "Plan")
             emit(root, kind="plan", title=clip(first, 120), body=clip(plan, 8000), **E)
-        if who == "main" and mail_waiting(root, sid):  # mail reaches a session mid-turn
-            hook_output(event, deliver_mail(root, sid))
+        if who == "main" and mail_waiting(root, sid):  # mail and new goals reach a session mid-turn
+            hook_output(event, deliver(root, sid))
 
     elif event == "SubagentStart":
         got = _pending(root, "pop", sid, typ or "") or {}
         _, st = emit(root, kind="agent_start", title="%s started" % who, desc=got.get("desc", ""),
                      prompt=got.get("prompt", ""), **E)
-        hook_output(event, context_for(root, sid, who, st["sessions"][sid].get("work")))
+        hook_output(event, "\n".join(x for x in (context_for(root, sid, who, st["sessions"][sid].get("work")),
+                                                  goal_block(st, full=False)) if x))
 
     elif event == "SubagentStop":
         msg = inp.get("last_assistant_message")
@@ -1446,6 +1531,11 @@ def handle_hook(inp):
             emit(root, kind="output", title="Output of %s" % who, body=clip(msg, 12000), **E)
 
     elif event == "Stop":
+        why = keep_going(load_state(root), sid) if who == "main" else None
+        if why:
+            emit(root, kind="goal_continue", title="Kept going: standing goal is open", **E)
+            print(json.dumps({"decision": "block", "reason": why}))
+            return
         emit(root, kind="turn_end", title="Waiting for user",
              body=clip(inp.get("last_assistant_message"), 600), **E)
         sync_later(root)
@@ -1579,6 +1669,118 @@ def attach(root, mid, paths):
             f.write(data)
         out.append({"name": os.path.basename(p), "path": rp, "bytes": size, "kept": len(data)})
     return out
+
+
+def goal_block(st, full=True):
+    g = st.get("goal")
+    if not g or g["status"] != "active":
+        return None
+    if not full:
+        return ("<docket-goal>Standing goal from the user%s: %s (full text: goal)</docket-goal>"
+                % (", autonomous mode" if g["autonomous"] else "", clip(" ".join(g["text"].split()), 240)))
+    return "\n".join(['<docket-goal from="the user" set="%s">' % time.strftime("%Y-%m-%d %H:%M", time.localtime(g["ts"])),
+                      "The user set this standing goal for every session and agent in this project. It is their "
+                      "instruction (checked against their own prompt), and it holds until they change it:", "",
+                      g["text"].strip(), ""] + ([CHARTER, ""] if g["autonomous"] else []) +
+                     [lanes_text(st), audit_line(st), "Goal thread: board post %s (%s reply %s \"<proposal, doubt or update>\" reaches "
+                      "every session)." % (g.get("thread") or "-", cli(), g.get("thread") or "<id>"), ""] +
+                     ['When it is met, say so with evidence: %s goal met -b "<evidence>". Pass this goal to every '
+                      "subagent you spawn." % cli(), "</docket-goal>"])
+
+
+def audit_line(st):
+    rows = audit(st)
+    if not rows:
+        return "Task audit: nothing stale or unverified."
+    n = {}
+    for r in rows:
+        n[r[2]] = n.get(r[2], 0) + 1
+    return "Task audit: %s. Run %s audit and check each against the code." % (
+        ", ".join("%d %s" % (v, k.lower()) for k, v in sorted(n.items())), cli())
+
+
+def lanes_text(st):
+    ls = sorted(st.get("lanes", {}).values(), key=lambda l: l["ts"])
+    if not ls:
+        return "Lanes: none taken yet. Propose a split on the goal thread, then take yours."
+    return "Lanes (who owns which part):\n" + "\n".join("- %s: %s%s%s" % (
+        l["name"], sname(st, l["sid"]), "" if is_live(st["sessions"].get(l["sid"])) else " (not live; can be taken over)",
+        " - " + clip(l["scope"], 200) if l["scope"] else "") for l in ls)
+
+
+def user_prompts(roots, sid):
+    """Every prompt the user typed in this session, from the full log (state keeps only recent events)."""
+    out = []
+    for r in roots:
+        try:
+            with open(os.path.join(bdir(r), "events.jsonl"), encoding="utf-8") as f:
+                for line in f:
+                    if '"prompt"' in line and sid in line:
+                        try:
+                            e = json.loads(line)
+                        except ValueError:
+                            continue
+                        if e.get("kind") == "prompt" and e.get("sid") == sid:
+                            out.append(e.get("body") or "")
+        except OSError:
+            pass
+    return out
+
+
+def user_said(root, sid, text, extra_roots=(), needs=()):
+    """True when the user wrote this: most of its terms (and one of `needs`, if given) appear in a prompt
+    they typed in this session (recorded by the hook, not by agents), or it was run outside Claude Code."""
+    if "CLAUDECODE" not in os.environ:
+        return True
+    # ponytail: stops agents inventing or ending goals by accident or injection; env -u still gets past it
+    want = set(tokens(text))
+    for p in user_prompts([root] + list(extra_roots), sid):
+        low = p.lower().replace("’", "'")
+        if len(want & set(tokens(p))) >= 0.75 * len(want) and (not needs or any(w in low for w in needs)):
+            return True
+    return False
+
+
+def deliver(root, sid, st=None):
+    """What a session hasn't seen yet: a new standing goal, then unread mail."""
+    st = st or load_state(root)
+    g, out = st.get("goal"), []
+    if g and g["status"] == "active" and st["sessions"].get(sid, {}).get("goalSeen") != g["id"]:
+        out.append(goal_block(st))
+        emit(root, sid=sid, kind="goal_seen", ref=g["id"], title="Read the standing goal")
+    out.append(deliver_mail(root, sid, st))
+    return "\n".join(x for x in out if x) or None
+
+
+def keep_going(st, sid):
+    """Stop-hook reason to continue, when an autonomous goal is open and nothing justifies stopping."""
+    g, s = st.get("goal"), st["sessions"].get(sid, {})
+    if not (g and g["status"] == "active" and g["autonomous"]) or os.environ.get("DOCKET_GOAL_STOP") == "off":
+        return None
+    lane = any(l["sid"] == sid for l in st.get("lanes", {}).values())
+    joined = lane or g["sid"] == sid or any(m["sid"] == sid and m["re"] == g.get("thread") for m in st.get("msgs", []))
+    if not joined:
+        return None  # sessions on other work only get the goal in context, they aren't driven by it
+    if any(a["status"] == "running" and now() - a["last"] < LIVE_SECS for a in s.get("agents", {}).values()):
+        return None  # waiting on its own subagents is not idling
+    if any(e["kind"] == "blocker" and not e.get("resolved") and e["ts"] >= s.get("promptTs", 0)
+           for e in s.get("entries", [])):
+        return None  # it logged a real blocker this turn
+    if s.get("continues", 0) >= GOAL_MAX_CONTINUES:
+        return None  # ponytail: a fixed cap stops runaway loops; raise DOCKET_GOAL_MAX_CONTINUES for longer runs
+    c = cli()
+    if not lane:
+        return ("The user's standing goal is open and you have no lane yet: %s. Coordinate now: read the goal "
+                "thread (%s board) and the lanes (%s lanes), reply on the thread with what you'll own and any doubts, "
+                "agree with the others, then take your lane (%s lane take \"<area>\" -b \"<scope>\") and start. "
+                "(Continuation %d of %d.)" % (clip(" ".join(g["text"].split()), 200), c, c, c,
+                                               s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
+    return ("The user's standing goal is still open and in autonomous mode: %s. Don't stop to ask for "
+            "permission. Run audit and settle what it lists in your lane, post your progress on the goal thread, read the others' updates (%s board, %s inbox), "
+            "then pick the next step in your lane: the pending tasks on your work item, delegate independent pieces to subagents, verify on inputs you "
+            "didn't tune on, commit and merge what's finished. If you are truly blocked, log it (%s log blocker "
+            "\"...\") and stop. If the goal is met, run %s goal met -b \"<evidence>\". (Continuation %d of %d.)"
+            % (clip(" ".join(g["text"].split()), 200), c, c, c, c, s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
 
 
 def mail_waiting(root, sid):
@@ -1889,7 +2091,8 @@ def main():
     pe.add_argument("wid")
     pe.add_argument("--all", action="store_true", help="include done/dropped")
     for name, hlp in (("adopt", "take pending tasks into this session"),
-                      ("resolve", "mark pending tasks as already done"),
+                      ("resolve", "mark pending tasks as already done (--reason: the evidence)"),
+                      ("reopen", "a task marked done that isn't (needs --reason: what's missing)"),
                       ("drop", "mark pending tasks as not needed (needs --reason)")):
         p = sub.add_parser(name, help=hlp)
         p.add_argument("pids", nargs="+")
@@ -1944,6 +2147,22 @@ def main():
     up.add_argument("ref")
     up.add_argument("--session", **sess)
     sub.add_parser("who", help="live sessions you can message")
+    ln = sub.add_parser("lane", help="take or drop your part of the goal")
+    ln.add_argument("action", choices=["take", "drop"])
+    ln.add_argument("name")
+    ln.add_argument("-b", "--body", default="", help="take: the scope, what's in and out")
+    ln.add_argument("--session", **sess)
+    sub.add_parser("lanes", help="who owns which part of the goal")
+    sub.add_parser("audit", help="tasks to check: not done, stale, done without evidence, items to close")
+    gl = sub.add_parser("goal", help="the user's standing goal for every session: show, set, met, clear")
+    gl.add_argument("action", nargs="?", default="show", choices=["show", "set", "met", "clear"])
+    gl.add_argument("text", nargs="?", default="")
+    gl.add_argument("-b", "--body", default="", help="met: the evidence")
+    gl.add_argument("--autonomous", action="store_true",
+                    help="sessions keep working toward it without waiting for permission, delegate, and don't stop until it's met")
+    gl.add_argument("--prompt-from", action="append", default=[],
+                    help="another project whose record holds the user's prompt (when set from a session elsewhere)")
+    gl.add_argument("--session", **sess)
     sy = sub.add_parser("sync", help="commit the record to git (refs/docket/log); with a remote, pull and push it")
     sy.add_argument("--remote", help="git remote to share through (remembered as docket.remote)")
     sy.add_argument("--quiet", action="store_true")
@@ -2063,7 +2282,8 @@ def main():
         if a.cmd == "reply":
             orig = find_msg(st, a.ref) or sys.exit("No message with id %s (or the prefix matches several)." % a.ref)
             re_ = orig["re"] or orig["id"]
-            to = (["board"] if "board" in orig["to"] else []) + (
+            g_ = st.get("goal") or {}
+            to = ["board", "all"] if re_ == g_.get("thread") and g_.get("status") == "active" else (["board"] if "board" in orig["to"] else []) + (
                 [orig["sid"]] if orig["sid"] != sid else [t for t in orig["to"] if t != "board"])
         elif a.cmd == "post":
             to = ["board"]
@@ -2092,6 +2312,70 @@ def main():
                                        "".join("\n  attached %s (%s)" % (f["path"], attach_note(f)) for f in ev.get("files", []))))
         if ev.get("wids"):
             print("  tracked as pending task A-%s on %s" % (mid[:6], ", ".join(ev["wids"])))
+        return 0
+    if a.cmd == "audit":
+        rows = audit(st)
+        for wid, pid, tag, text in rows:
+            print("%-8s %-9s %-11s %s" % (wid, pid, tag, text))
+        print("Nothing stale or unverified." if not rows else
+              "\nCheck each against the code: done -> resolve <id> --reason \"<evidence>\"; marked done but isn't -> "
+              "reopen <id> --reason \"<what's missing>\"; not done -> adopt it or tell its lane owner; no longer "
+              "needed -> drop <id> --reason; CLOSE? -> work status W-xxxx done.")
+        return 0
+    if a.cmd == "lanes":
+        print(lanes_text(st))
+        return 0
+    if a.cmd == "lane":
+        key = _norm(a.name) or a.name.lower()
+        held = st.get("lanes", {}).get(key)
+        if a.action == "take" and held and held["sid"] != sid and is_live(st["sessions"].get(held["sid"])):
+            sys.exit("Lane %r is %s's. Agree a split on the goal thread or message them (msg %s \"...\") "
+                     "instead of working on it in parallel." % (held["name"], sname(st, held["sid"]), held["sid"][:8]))
+        if a.action == "drop" and not held:
+            sys.exit("No lane %r." % a.name)
+        emit(root, sid=sid, kind="lane", title=held["name"] if held and a.action == "drop" else clip(a.name, 80),
+             body=clip(a.body, 1000), drop=a.action == "drop")
+        g = st.get("goal")
+        if g and g.get("thread") and a.action == "take":
+            emit(root, sid=sid, kind="msg", to=["board", "all"], re=g["thread"], title="Taking lane: " + clip(a.name, 80),
+                 body=clip(a.body, 1000))
+        print("%s lane %s" % ("took" if a.action == "take" else "dropped", a.name))
+        return 0
+    if a.cmd == "goal":
+        g = st.get("goal")
+        if a.action == "show":
+            print(goal_block(st) or ("No standing goal." if not g else "Goal %s %s by %s: %s\n\n%s" % (
+                g["status"], ago(g.get("endTs", g["ts"])), sname(st, g.get("endBy", g["sid"])), g["note"], g["text"])))
+            return 0
+        if a.action == "set":
+            text = (a.text or a.body).strip() or sys.exit("goal set needs the goal text.")
+            if not user_said(root, sid, text, a.prompt_from):
+                sys.exit("Refused: a standing goal must be the user's own words, and this text isn't in any prompt "
+                         "the user typed in this session. Quote the user, or ask them to run: goal set \"...\"")
+            if a.autonomous and not user_said(root, sid, text, a.prompt_from, AUTONOMY_WORDS):
+                sys.exit("Refused --autonomous: the user's prompt doesn't ask for it (no \"keep working\", \"don't wait "
+                         "for permission\", \"until\"...). Set it without --autonomous, or ask the user.")
+            post, _ = emit(root, sid=sid, kind="msg", to=["board", "all"], pin=True, title="Goal: " + clip(text, 160),
+                           body="Discuss, divide and report here. Reply with what you propose to own, your doubts, "
+                                "and progress updates with numbers.")
+            ev, st = emit(root, sid=sid, kind="goal_set", title=clip(text, 200), body=clip(text, 6000),
+                          autonomous=a.autonomous, thread=post["id"])
+            print("standing goal set (%s); every session and agent gets it now, live ones mid-turn"
+                  % ("autonomous: sessions keep going until it's met" if a.autonomous else "reminder only"))
+            return 0
+        if not g or g["status"] != "active":
+            sys.exit("No active goal.")
+        if a.action == "met" and not a.body.strip():
+            sys.exit("goal met needs -b \"<evidence>\": what was measured, where, and the numbers.")
+        if a.action == "clear" and not user_said(root, sid, "goal", a.prompt_from, ("clear", "stop", "cancel", "drop", "end", "remove")):
+            sys.exit("Refused: only the user can clear their goal. If it no longer makes sense, say why on the goal "
+                     "thread and ask the user.")
+        emit(root, sid=sid, kind="goal_" + a.action, title="Goal " + a.action, body=clip(a.body, 4000))
+        emit(root, sid=sid, kind="msg", to=["board", "all"], pin=a.action == "met", re=g.get("thread"),
+             title="Goal claimed met by %s; the user should confirm" % sname(st, sid) if a.action == "met"
+             else "The user cleared the standing goal", body=clip(a.body, 4000))
+        print("goal %s" % ("claimed met; every session and the board are told, for the user to confirm"
+                           if a.action == "met" else "cleared; every session is told"))
         return 0
     if a.cmd == "unpin":
         m = find_msg(st, a.ref) or sys.exit("No message with id %s." % a.ref)
@@ -2141,10 +2425,10 @@ def main():
              kind="claim", paths=paths, ttl=a.ttl * 60, **({"wid": wid} if wid else {}))
         print("claimed %s for %d min (release with: release)" % (", ".join(paths), a.ttl))
         return 0
-    if a.cmd in ("adopt", "resolve", "drop"):
-        if a.cmd == "drop" and not a.reason:
-            sys.exit("drop needs --reason, so the next session knows why it was not done.")
-        status = {"adopt": "adopted", "resolve": "done", "drop": "dropped"}[a.cmd]
+    if a.cmd in ("adopt", "resolve", "drop", "reopen"):
+        if a.cmd in ("drop", "reopen") and not a.reason:
+            sys.exit("%s needs --reason, so the next session knows why." % a.cmd)
+        status = {"adopt": "adopted", "resolve": "done", "drop": "dropped", "reopen": "reopened"}[a.cmd]
         if a.cmd == "adopt":  # critique before following: no adopting unreviewed work
             for wid in {find_pending(st, p)[0] for p in a.pids} - {None}:
                 if needs_review(st, wid, sid):

@@ -97,6 +97,19 @@ code,pre{font-family:var(--mono)}
 .files a{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--rule);border-radius:8px;padding:5px 10px;font:12.5px var(--mono);color:var(--ink2);text-decoration:none}
 .files a:hover{border-color:var(--rule2);color:var(--ink)}
 .files a span{font:11.5px var(--sans);color:var(--faint)}
+.sgoal{border:1px solid var(--rule);border-left:3px solid var(--link);border-radius:12px;padding:16px 20px;margin:18px 0 24px;background:var(--paper)}
+.sgoal .k{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font:600 10.5px var(--sans);letter-spacing:.1em;text-transform:uppercase;color:var(--link)}
+.sgoal .k .chip{margin-left:0}
+.sgoal .md{font:15.5px/1.55 var(--serif);color:var(--ink);margin-top:8px}
+.sgoal .md p:last-child{margin-bottom:0}
+.sgoal .f{font:12px var(--sans);color:var(--muted);margin-top:10px}
+.lanes{margin-top:14px;display:grid;gap:6px}
+.lanes .label{margin-bottom:2px}
+.lanes .empty{margin:0;font-size:13px}
+.lane{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;font:13px var(--sans);color:var(--muted)}
+.lane b{color:var(--ink);font-weight:600}
+.lane .sc{flex-basis:100%;padding-left:28px;font-size:12.5px;color:var(--faint)}
+.sgoal.met{border-left-color:var(--ok)}.sgoal.met .k{color:var(--ok)}
 .rcpt{font:12px var(--sans);color:var(--faint);margin-top:6px}
 .board .empty-how{border:1px dashed var(--rule2);border-radius:10px;padding:18px 20px;color:var(--muted);font-size:14px}
 .board .empty-how pre{margin:10px 0 0;font-size:12.5px;color:var(--ink2);white-space:pre-wrap}
@@ -498,6 +511,7 @@ function overview(){
   h+='<h1 class="masthead">Agent Journal</h1>';
   h+='<div class="dateline"><span>'+d.toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long",year:"numeric"})+'</span><span>'+list.length+' session'+(list.length===1?"":"s")+(B.updated?' · last word '+ago(B.updated):"")+'</span></div>';
   var rows=Object.values(B.index||{}), sum=function(k){ return rows.reduce(function(n,r){return n+(r[k]||0);},0); };
+  h+=goalHtml();
   if(list.length) h+=tiles([
     {v:list.filter(function(s){return stateOf(s)==="working";}).length, k:"sessions writing now", tone:"live"},
     {v:list.filter(function(s){return stateOf(s)==="waiting";}).length, k:"waiting on you", tone:"wait"},
@@ -730,9 +744,18 @@ function threadHtml(m, replies, arrow){
   var h='<article class="thread">'+av(m.sid)+'<div>'+msgMeta(m, arrow)+'<h3>'+inline(m.title)+'</h3>'+(m.body?'<div class="md">'+flag(md(m.body))+'</div>':'')+files(m)+(arrow?receipts(m):'');
   if(replies.length) h+='<div class="replies">'+replies.map(function(r){ return '<div class="reply">'+msgMeta(r, false)+'<p class="t">'+inline(r.title)+'</p>'+(r.body?'<div class="md">'+flag(md(r.body))+'</div>':'')+'</div>'; }).join("")+'</div>';
   return h+'</div></article>'; }
+function lanesHtml(){ var ls=Object.values(B.lanes||{}).sort(function(a,b){return a.ts-b.ts;});
+  if(!ls.length) return '<div class="lanes"><span class="label">Lanes</span><p class="empty">None taken yet. Sessions agree a split on the goal thread, then each takes one.</p></div>';
+  return '<div class="lanes"><span class="label">Lanes · who owns which part</span>'+ls.map(function(l){ var s=B.sessions[l.sid];
+    return '<div class="lane">'+av(l.sid,true)+'<b>'+esc(l.name)+'</b><span>'+esc(snameId(l.sid))+(s&&stateOf(s)==="finished"?' · ended':'')+'</span>'+(l.scope?'<span class="sc">'+esc(l.scope)+'</span>':'')+'</div>'; }).join("")+'</div>'; }
+function goalHtml(){ var g=B.goal; if(!g||g.status==="cleared") return "";
+  var met=g.status==="met", sw=(B.sessions||{}), who=function(id){ return sw[id]? esc(sname(sw[id])) : "session "+esc(String(id).slice(0,8)); };
+  return '<section class="sgoal'+(met?" met":"")+'" aria-label="Standing goal"><div class="k">'+(met?"Goal met":"Standing goal from you")+(g.autonomous&&!met?chip("autonomous: sessions keep going","live"):"")+'</div>'+
+    '<div class="md">'+md(g.text)+'</div>'+(!met&&g.thread?lanesHtml():'')+'<div class="f">Set '+ago(g.ts)+' via '+who(g.sid)+(met?' · marked met '+ago(g.endTs)+' by '+who(g.endBy)+(g.note?': '+esc(g.note):''):' · every session and agent gets it')+'</div></section>'; }
 function boardPage(){
   var all=B.msgs||[], posts=all.filter(function(m){return m.to.indexOf("board")>=0;}), dms=all.filter(function(m){return m.to.indexOf("board")<0;});
   var sy=B.sync, h='<div class="board"><div class="kick"><span class="label">Project board</span></div><h1 class="title">Board</h1>';
+  h+=goalHtml();
   h+='<p class="lede">Notices every session reads, and what sessions told each other. Pinned posts are shown to each new session when it starts.</p>';
   h+='<div class="gitline">'+(sy&&sy.head? '<span class="ref">'+esc(sy.ref)+'</span><span>@ <span class="hash">'+esc(sy.head)+'</span></span><span>'+sy.events+' events in git</span><span>synced '+ago(sy.ts)+(sy.remote?' with '+esc(sy.remote):' (local only)')+'</span>' : '<span class="ref">refs/docket/log</span><span>Not in git yet. It syncs after each turn in a git repo, or run <code>docket.py sync</code>.</span>')+'</div>';
   var boardTab=/^#\/board\/messages/.test(location.hash)?"msgs":"board";
