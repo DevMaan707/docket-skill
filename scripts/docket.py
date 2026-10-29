@@ -34,6 +34,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -777,6 +778,12 @@ def apply(st, ev):
         for m in st.get("msgs", []):
             if m["id"] in ids and sid not in m["readBy"]:
                 m["readBy"].append(sid)
+    elif kind == "msg_fix":  # a cut-off message's full text, recovered later
+        for m in st.get("msgs", []):
+            if m["id"] == ev.get("ref"):
+                m["body"] = ev.get("body") or m["body"]
+                if ev.get("unread"):
+                    m["readBy"] = []
     elif kind == "unpin":
         for m in st.get("msgs", []):
             if m["id"] == ev.get("ref"):
@@ -907,7 +914,7 @@ def emit(root, _guard=None, **ev):
             _append(root, st, dict(ts=ev["ts"], id=uuid.uuid4().hex[:10], agent="main", sid=x["id"],
                                    kind="session_end", title="Session ended (process exited)"))
         _append(root, st, ev)
-        if ev["kind"] in ("msg", "goal_set", "directive_add", "directive_drop"):  # lets hooks spot new mail without loading state
+        if ev["kind"] in ("msg", "msg_fix", "goal_set", "directive_add", "directive_drop"):  # lets hooks spot new mail without loading state
             with open(os.path.join(bdir(root), "mail.stamp"), "w") as f:
                 f.write(ev["id"])
         s = st["sessions"].get(ev["sid"], {})
@@ -2117,6 +2124,49 @@ def listen(root, sid, hours):
             pass
 
 
+def recover_msgs(root, st, hours):
+    """Messages cut at 200 chars before 527e955: find the sender's original command in its Claude Code
+    transcript and restore the full text. Recent ones are redelivered."""
+    import glob
+    cut = [m for m in st.get("msgs", []) if not m["body"] and m["title"].endswith("…") and len(m["title"]) >= 190]
+    if not cut:
+        return "No cut-off messages."
+    base = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    texts = {}
+    for sid in {m["sid"] for m in cut}:
+        for path in glob.glob(os.path.join(base, "*", sid + ".jsonl")) + \
+                glob.glob(os.path.join(base, "*", sid, "subagents", "*.jsonl")):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if "docket.py" in line and '"tool_use"' in line:
+                            for c in (json.loads(line).get("message") or {}).get("content") or []:
+                                cmd = isinstance(c, dict) and (c.get("input") or {}).get("command")
+                                if cmd and "docket.py" in cmd:
+                                    texts.setdefault(sid, []).append(cmd)
+            except (OSError, ValueError):
+                continue
+    fixed = 0
+    for m in cut:
+        head = m["title"][:-1]
+        for cmd in texts.get(m["sid"], []):
+            try:
+                toks = shlex.split(cmd)
+            except ValueError:
+                toks = []
+            full = next((t for t in toks if t.startswith(head) and len(t) > len(head) + 1), None)
+            i = cmd.find(head)
+            if not full and i > 0 and cmd[i - 1] in "'\"":  # inside a heredoc or $(...): read to the closing quote
+                j = cmd.find(cmd[i - 1], i + len(head))
+                full = cmd[i:j] if j > 0 else None
+            if full:
+                emit(root, sid=m["sid"], kind="msg_fix", ref=m["id"], title="Recovered full text of " + m["id"],
+                     body=clip(full, 6000), unread=now() - m["ts"] < hours * 3600)
+                fixed += 1
+                break
+    return "Recovered %d of %d cut-off messages; those under %g h old are redelivered." % (fixed, len(cut), hours)
+
+
 def pinned_block(st):
     pins = [m for m in st.get("msgs", []) if m["pin"] and "board" in m["to"]]
     if not pins:
@@ -2446,6 +2496,8 @@ def main():
         p_.add_argument("-b", "--body", default="")
         p_.add_argument("--session", **sess)
         p_.add_argument("--agent", **agent_)
+    rc_ = sub.add_parser("recover-msgs", help="restore messages cut at 200 chars from the senders' transcripts")
+    rc_.add_argument("--redeliver-hours", type=float, default=6)
     ib = sub.add_parser("inbox", help="your unread messages (marks them read)")
     ib.add_argument("--all", action="store_true", help="recent mail to and from you, read or not")
     ib.add_argument("--session", **sess)
@@ -2755,6 +2807,9 @@ def main():
         m = find_msg(st, a.ref) or sys.exit("No message with id %s." % a.ref)
         emit(root, sid=sid, kind="unpin", ref=m["id"], title="Unpinned " + m["id"])
         print("unpinned " + m["id"])
+        return 0
+    if a.cmd == "recover-msgs":
+        print(recover_msgs(root, st, a.redeliver_hours))
         return 0
     if a.cmd == "inbox":
         if a.all:

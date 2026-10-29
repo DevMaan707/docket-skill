@@ -472,6 +472,26 @@ def main():
         ctx = hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})
         check("a long message passed as the title isn't cut off", "END-OF-LONG-TITLE" in ctx, ctx[-400:])
 
+        # messages cut at 200 chars by older versions: restored from the sender's transcript
+        full = "Old-style message " + "y" * 250 + " TAIL-RECOVERED"
+        evp = os.path.join(d, ".docket", "events.jsonl")
+        with open(evp, encoding="utf-8") as f:
+            proto = [json.loads(l) for l in f if '"kind": "msg"' in l][-1]
+        proto.update(id="cut0000001", sid="sM2", title=full[:199] + "\u2026", body="", ts=time.time() - 60)
+        with open(evp, "a", encoding="utf-8") as f:
+            f.write(json.dumps(proto) + "\n")
+        run(["rebuild"], d)
+        home = tempfile.mkdtemp(prefix="docket-home-")
+        os.makedirs(os.path.join(home, ".claude", "projects", "p"))
+        with open(os.path.join(home, ".claude", "projects", "p", "sM2.jsonl"), "w") as f:
+            f.write(json.dumps({"message": {"content": [{"type": "tool_use", "name": "Bash", "input": {
+                "command": 'python3 docket.py msg all "%s"' % full}}]}}) + "\n")
+        code, out = run(["recover-msgs"], d, extra_env=dict(HOME=home))
+        check("recover-msgs restores a cut-off message", "Recovered 1 of 1" in out, out)
+        ctx = hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})
+        check("...and redelivers it in full", "TAIL-RECOVERED" in ctx, ctx[-400:])
+        shutil.rmtree(home, ignore_errors=True)
+
         # idle sessions: a background listener wakes them when mail arrives
         on = dict(DOCKET_LISTEN="on")
         stopL = lambda sid, **kw: run(["hook"], d, stdin=json.dumps(dict(hook_event_name="Stop", session_id=sid,
