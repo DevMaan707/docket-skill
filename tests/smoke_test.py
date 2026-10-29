@@ -55,6 +55,49 @@ def check(name, cond, detail=""):
             print("      " + detail.replace("\n", "\n      ")[:1200])
 
 
+def git_sync():
+    """Two clones share the record through a bare remote; a W-id both create is renumbered."""
+    base = tempfile.mkdtemp(prefix="docket-git-")
+    try:
+        _git_sync(base)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def _git_sync(base):
+    g = lambda cwd, *a: subprocess.run(["git", "-C", cwd] + list(a), capture_output=True, text=True)
+    remote, A, B = (os.path.join(base, n) for n in ("remote.git", "cloneA", "cloneB"))
+    g(base, "init", "-q", "--bare", remote)
+    for c in (A, B):
+        g(base, "init", "-q", c)
+        g(c, "remote", "add", "origin", remote)
+    run(["work", "new", "Alpha", "--top-level"], A, "gA")
+    code, out = run(["sync", "--remote", "origin"], A)
+    check("sync commits and pushes the record", code == 0 and "refs/docket/log" in out and "pushed" in out, out)
+    run(["work", "new", "Beta", "--top-level"], B, "gB")
+    code, out = run(["sync", "--remote", "origin"], B)
+    check("a W-id taken on another machine is renumbered", "RENUMBERED W-0001 -> W-0002" in out, out)
+    st = json.load(open(os.path.join(B, ".docket", "state.json")))
+    check("both machines' work is in the merged record",
+          {w["title"] for w in st["work"].values()} == {"Alpha", "Beta"} and st["work"]["W-0002"]["title"] == "Beta", out)
+    run(["sync"], A)
+    st = json.load(open(os.path.join(A, ".docket", "state.json")))
+    check("sync pulls with the remembered remote", len(st["work"]) == 2, json.dumps(st["work"])[:300])
+    with open(os.path.join(A, "slow.log"), "w") as f:
+        f.write("gate took 412s\n")
+    run(["msg", "all", "Gate is slow", "--attach", os.path.join(A, "slow.log")], A, "gA")
+    run(["sync"], A)
+    run(["sync", "--remote", "origin"], B)
+    got = [n for r, _, fs in os.walk(os.path.join(B, ".docket", "files")) for n in fs]
+    check("attachments travel through git", got == ["slow.log"], str(got))
+    shutil.rmtree(os.path.join(A, ".docket"))
+    code, out = run(["sync"], A)
+    st = json.load(open(os.path.join(A, ".docket", "state.json")))
+    check("a wiped .docket is restored from git", len(st["work"]) == 2, out)
+    log = g(A, "log", "--oneline", "refs/docket/log").stdout
+    check("the record has git history", len(log.splitlines()) >= 2, log)
+
+
 def main():
     keep = "--keep" in sys.argv
     d = tempfile.mkdtemp(prefix="docket-smoke-")
@@ -258,6 +301,51 @@ def main():
               code == 0 and "## Corrected claims" in page and brief_id in page and fact_id in page
               and "Decode done" not in page.split("## Current brief")[1].split("##")[0], out)
 
+        # messages and the board
+        hook(d, "SessionStart", "sM1"); hook(d, "SessionStart", "sM2")
+        run(["name", "Gate speed"], d, "sM1"); run(["work", "attach", "W-0001"], d, "sM2")
+        code, out = run(["msg", "Gate speed", "Is the box free?", "-b", "Load is 33."], d, "sM2")
+        check("msg addresses a session by name", code == 0 and "sent" in out, out)
+        code, out = run(["msg", "nobody-here", "hi"], d, "sM2")
+        check("msg refuses an unknown recipient", code != 0 and "No session" in out, out)
+        ctx = hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})
+        check("mail reaches a session mid-turn", "Is the box free?" in ctx and "Load is 33." in ctx, ctx)
+        ctx = hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})
+        check("mail is delivered once", "Is the box free?" not in ctx, ctx)
+        code, out = run(["inbox", "--all"], d, "sM1")
+        mid = out.split("]")[0].strip("[")
+        code, out = run(["reply", mid, "Yes, go ahead"], d, "sM1")
+        ctx = hook(d, "UserPromptSubmit", "sM2", prompt="carry on")
+        check("a reply reaches the sender with its next prompt", "Yes, go ahead" in ctx, ctx)
+        run(["msg", "W-0001", "Baseline moved to 63"], d, "sM1")
+        code, out = run(["inbox"], d, "sM2")
+        check("a message to a work item reaches whoever is attached", "Baseline moved to 63" in out, out)
+        run(["post", "Shared box is overloaded", "-b", "Check load first.", "--pin"], d, "sM1")
+        ctx = hook(d, "SessionStart", "sM3")
+        check("pinned board posts reach new sessions", "Shared box is overloaded" in ctx, ctx)
+        code, out = run(["board"], d)
+        check("board lists pinned posts", "PINNED" in out and "Shared box" in out, out)
+        ctx = hook(d, "UserPromptSubmit", "sM3", prompt="hello there friend")
+        check("old broadcasts don't flood a new session", "Is the box free?" not in ctx, ctx)
+
+        # one session finds a slow build in another's area and hands it over
+        run(["work", "new", "Faster builds and gate speed", "-k", "build,gate,speed", "--top-level"], d, "sOpt")
+        log = os.path.join(d, "build.log")
+        with open(log, "w") as f:
+            f.write("noise\n" * 300000 + "OWASP dependency-check took 412s\n")
+        code, out = run(["msg", "--about", "build speed", "Build got slower: 9m40s", "--kind", "ask",
+                         "--attach", log], d, "sM2")
+        check("--about routes to the work item that owns the topic", code == 0 and "routed to W-" in out, out)
+        aid = out.split("pending task ")[1].split()[0] if "pending task " in out else "?"
+        wid = out.split("routed to ")[1].split()[0] if "routed to " in out else "?"
+        code, pend = run(["pending", wid], d)
+        check("an ask is tracked as a pending task on the owner's item", aid in pend and "Asked by" in pend, pend)
+        ctx = hook(d, "UserPromptSubmit", "sOpt", prompt="keep going")
+        kept = os.path.join(d, ".docket", "files")
+        tail = open(next(os.path.join(r, n) for r, _, fs in os.walk(kept) for n in fs)).read()
+        check("the owner gets the ask with the log, tail kept",
+              "ASKS YOU TO ACT" in ctx and "build.log" in ctx and "last" in ctx and tail.endswith("took 412s\n"), ctx)
+
         before = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
         run(["rebuild"], d)
         after = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
@@ -265,6 +353,7 @@ def main():
         a.pop("index", None); b.pop("index", None)
         check("rebuild reproduces state", a == b)
 
+        git_sync()
         print("\n%s  (%s)" % ("FAILED: %d" % len(FAILS) if FAILS else "all passed",
                               os.path.join(d, ".docket", "index.html") if keep else "temp folder removed"))
     finally:

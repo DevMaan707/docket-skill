@@ -85,6 +85,40 @@ uses compare-and-swap as the backstop:
 
 `DOCKET_LEASES=warn` turns denials into warnings; `off` disables leases.
 
+## Agents talk to each other
+
+Parallel sessions can't see each other's context, so docket carries mail between them, the way
+[mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail) does for MCP agents, but
+through hooks with no server:
+
+- `msg <session|W-xxxx|all> "…"` writes to one session (by name or id), everyone attached to a
+  work item, or every session. `reply <id>` threads it.
+- `--about "build speed"` routes to whichever open work item owns the topic. `--kind fyi`
+  makes the owner aware; `finding` reports a cause you already found; `ask` hands the problem
+  over and is tracked as a pending task on their item. `--attach build.log` hands over files,
+  keeping the tail of big logs.
+- `post "…" [--pin]` puts a notice on the project board: shared machines, changed baselines,
+  rules the user set. Pinned posts are shown to every new session.
+- Unread mail is injected with the next prompt and after any tool call, so a session mid-run gets
+  it too, then marked read. A two-stat check keeps that cheap when nothing is waiting.
+- Mail is labelled as notes from a colleague, not instructions, and instruction-like text is
+  flagged like any other docket text.
+
+The journal's **Board** page shows pinned notices, threads and messages with read receipts.
+
+## The record is in git
+
+Like [git-bug](https://github.com/git-bug/git-bug) and GitLoom, the record lives in git:
+`events.jsonl` (split by day) and the work pages are committed after every turn to
+`refs/docket/log`. That ref sits outside your branches, so it never appears in `main`, PRs or
+`git status`. You get history and diffs of every work page, and a wiped `.docket/` is restored by
+`docket.py sync`.
+
+`docket.py sync --remote origin` shares it across machines; after that every turn pulls and
+pushes in the background. Events are append-only with unique ids, so merging is a union. The
+pushed log wins, and a W-id two machines both created is renumbered on the one that hadn't pushed
+yet (`RENUMBERED W-a -> W-b`). `DOCKET_GIT=off` turns syncing off.
+
 ## Safeguards against context poisoning
 
 A wrong fact in shared memory gets repeated by every session that reads it, and each step that
@@ -116,7 +150,8 @@ builds on it still looks like it succeeded. Docket treats its own record as susp
   work/W-0001.md   one page per work item
 ```
 
-`.docket/` comes with its own `.gitignore`, so it is never committed by accident.
+`.docket/` comes with its own `.gitignore`, so it is never committed to your branches. Its
+history lives on `refs/docket/log` instead (see above).
 
 ## Viewer
 
@@ -138,6 +173,10 @@ each of these does part of it well:
   up front rather than built from what sessions did.
 - [claude-mem](https://docs.claude-mem.ai): cross-session context injection from a searchable store.
 - [claude-code-log](https://github.com/daaain/claude-code-log): static HTML from Claude Code transcripts.
+- [mcp_agent_mail](https://github.com/Dicklesworthstone/mcp_agent_mail): inboxes, threads and file
+  leases for coding agents over an MCP server, archived in git. Docket's messages follow its model.
+- [git-bug](https://github.com/git-bug/git-bug): issues stored in git objects on their own refs and
+  pushed and pulled like code. Docket's `refs/docket/log` is the same idea.
 
 Background: [How contexts fail](https://dbreunig.com/2025/06/22/how-contexts-fail-and-how-to-fix-them.html),
 [OWASP ASI06: memory and context poisoning](https://www.pointguardai.com/glossary/owasp-asi06-memory-and-context-poisoning).

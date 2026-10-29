@@ -46,8 +46,8 @@ code,pre{font-family:var(--mono)}
 .rail nav{margin-top:22px;flex:1;display:flex;flex-direction:column;gap:2px}
 .rlink{display:block;padding:8px 10px;border-radius:8px;text-decoration:none;color:var(--ink)}
 .rlink:hover{background:var(--panel)}
-.rlink:first-child{margin-bottom:10px}
-.rlink:first-child .t{font:500 13px var(--sans);color:var(--muted)}
+.rlink.top .t{font:500 13px var(--sans);color:var(--muted)}
+.rlink.top+.rlink:not(.top){margin-top:10px}
 .rlink .t{font:14.5px/1.35 var(--serif)}
 .rlink .m{font:11.5px/1.4 var(--sans);color:var(--faint);margin-top:2px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .rlink.sel{background:var(--panel)}
@@ -58,6 +58,49 @@ code,pre{font-family:var(--mono)}
 .rwork .id{font:10.5px var(--mono);color:var(--faint);padding-top:2px;flex:none}
 .rwork.sel{background:var(--panel);color:var(--ink);font-weight:600}
 .rwork.child{padding-left:26px;font-size:12.5px}
+/* board: git-log style, colours derived from each session's id (as GitLoom derives node colour from content) */
+.board{max-width:880px}
+.gitline{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font:12px var(--sans);color:var(--muted);margin:0 0 18px}
+.gitline .ref{font:11.5px var(--mono);color:var(--ink2);background:var(--panel);border-radius:6px;padding:2px 8px}
+.hash{font:11px var(--mono);color:var(--faint)}
+.gitline .hash{color:var(--link)}
+.lede{font:16px/1.5 var(--serif);color:var(--ink2);margin:0 0 14px;max-width:62ch}
+.av{--h:210;display:inline-flex;align-items:center;justify-content:center;flex:none;width:24px;height:24px;border-radius:50%;font:600 10px/1 var(--sans);letter-spacing:.02em;background:hsl(var(--h) 38% 88%);color:hsl(var(--h) 45% 30%)}
+.av.sm{width:18px;height:18px;font-size:8.5px}
+.av.all{background:var(--panel);color:var(--muted)}
+:root[data-theme="dark"] .av{background:hsl(var(--h) 26% 24%);color:hsl(var(--h) 55% 78%)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .av{background:hsl(var(--h) 26% 24%);color:hsl(var(--h) 55% 78%)}}
+.pins{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;margin:18px 0 28px}
+.pin{border:1px solid var(--rule);border-left:3px solid var(--wait);border-radius:10px;padding:14px 16px;background:var(--paper)}
+.pin .k{display:flex;gap:6px;align-items:center;font:600 10.5px var(--sans);letter-spacing:.1em;text-transform:uppercase;color:var(--wait);margin-bottom:6px}
+.pin h3{font:600 15.5px/1.35 var(--serif);margin:0 0 4px}
+.pin .md{font-size:13.5px;color:var(--ink2)}
+.pin .md p:last-child{margin-bottom:0}
+.pin .by{display:flex;gap:8px;align-items:center;font:12px var(--sans);color:var(--muted);margin-top:10px}
+.glog{position:relative;margin-top:14px}
+.thread{display:grid;grid-template-columns:28px minmax(0,1fr);column-gap:14px;position:relative;padding-bottom:22px}
+.thread::before{content:"";position:absolute;left:13.5px;top:30px;bottom:0;width:1px;background:var(--rule2)}
+.thread:last-child::before{display:none}
+.tmeta{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;font:12.5px var(--sans);color:var(--muted);min-height:24px}
+.tmeta b{color:var(--ink);font-weight:600}
+.tmeta .to{display:inline-flex;gap:6px;align-items:center}
+.tmeta .wid{font:11px var(--mono);color:var(--link);background:var(--livebg);border-radius:4px;padding:1px 5px;text-decoration:none}
+.thread h3{font:600 17px/1.35 var(--serif);margin:4px 0 4px}
+.thread .md{font-size:14px;color:var(--ink2)}
+.thread .md p:last-child{margin-bottom:0}
+.replies{margin-top:12px;display:grid;gap:10px;border-left:2px solid var(--rule);padding-left:16px}
+.reply .tmeta{font-size:12px}
+.reply p.t{margin:2px 0 0;font:14px/1.5 var(--sans);color:var(--ink)}
+.reply .md{font-size:13.5px}
+.tmeta .chip{margin-left:0}
+.files{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.files a{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--rule);border-radius:8px;padding:5px 10px;font:12.5px var(--mono);color:var(--ink2);text-decoration:none}
+.files a:hover{border-color:var(--rule2);color:var(--ink)}
+.files a span{font:11.5px var(--sans);color:var(--faint)}
+.rcpt{font:12px var(--sans);color:var(--faint);margin-top:6px}
+.board .empty-how{border:1px dashed var(--rule2);border-radius:10px;padding:18px 20px;color:var(--muted);font-size:14px}
+.board .empty-how pre{margin:10px 0 0;font-size:12.5px;color:var(--ink2);white-space:pre-wrap}
+.rlink .t .n{font:500 11px var(--sans);color:var(--faint);margin-left:6px}
 .railfoot{font:12px var(--sans);color:var(--muted);margin-top:20px;display:grid;gap:8px;padding:0 10px}
 .railfoot button{text-align:left;color:var(--muted)}
 .railfoot button:hover{color:var(--ink)}
@@ -170,8 +213,8 @@ h1.title{font:600 30px/1.2 var(--serif);letter-spacing:-.01em;margin:10px 0 12px
 .recordhead .n{font:12.5px var(--sans);color:var(--muted)}
 .tabs{display:flex;gap:2px;align-items:center;flex-wrap:wrap;margin:10px 0 4px;padding:3px;background:var(--panel);border-radius:9px;font:12.5px var(--sans);width:fit-content;max-width:100%}
 .tabs:empty{display:none}
-.tabs button{color:var(--muted);padding:4px 10px;border-radius:6px}
-.tabs button.on{color:var(--ink);background:var(--rule);font-weight:500}
+.tabs button,.tabs a{color:var(--muted);padding:4px 10px;border-radius:6px;text-decoration:none}
+.tabs button.on,.tabs a.on{color:var(--ink);background:var(--rule);font-weight:500}
 .tabs .sep{width:1px;height:16px;background:var(--rule2);margin:0 6px}
 .tabs label{color:var(--muted);display:flex;gap:6px;align-items:center;padding-right:6px}
 .tabs select{font:12.5px var(--sans);color:var(--ink);background:transparent;border:0;padding:2px 4px}
@@ -425,7 +468,9 @@ function workPath(wid){ var w=B.work&&B.work[wid]; if(!w) return ""; var p=[], s
 /* ---------- rail ---------- */
 function rail(route){
   var h='<p class="brand">Agent Journal</p><div class="proj">'+esc(B.project)+'</div><nav>';
-  h+='<a class="rlink'+(route.v==="all"?" sel":"")+'" href="#/"><div class="t">All sessions</div></a>';
+  h+='<a class="rlink top'+(route.v==="all"?" sel":"")+'" href="#/"><div class="t">All sessions</div></a>';
+  var nb=(B.msgs||[]).length;
+  h+='<a class="rlink top'+(route.v==="board"?" sel":"")+'" href="#/board"><div class="t">Board'+(nb?'<span class="n">'+nb+' message'+(nb===1?"":"s")+'</span>':'')+'</div></a>';
   sessions().forEach(function(s){
     h+='<a class="rlink'+(route.v==="s"&&route.id===s.id?" sel":"")+'" href="#/s/'+encodeURIComponent(s.id)+'"><div class="t">'+esc(sname(s))+'</div><div class="m">'+statusHtml(s)+'<span>'+ago(s.last)+'</span></div></a>';
   });
@@ -439,7 +484,7 @@ function rail(route){
   }
   h+='</nav><div class="railfoot"><button type="button" data-theme-cycle>Theme: '+theme+'</button><span id="upd">Record updated '+ago(B.updated)+'</span></div>';
   document.getElementById("rail").innerHTML=h;
-  var ms='<option value="#/">All sessions</option>'+sessions().map(function(s){return '<option value="#/s/'+encodeURIComponent(s.id)+'"'+(route.v==="s"&&route.id===s.id?" selected":"")+'>'+esc(sname(s))+' · '+SLABEL[stateOf(s)]+'</option>';}).join("")+
+  var ms='<option value="#/">All sessions</option><option value="#/board"'+(route.v==="board"?" selected":"")+'>Board</option>'+sessions().map(function(s){return '<option value="#/s/'+encodeURIComponent(s.id)+'"'+(route.v==="s"&&route.id===s.id?" selected":"")+'>'+esc(sname(s))+' · '+SLABEL[stateOf(s)]+'</option>';}).join("")+
     Object.values(B.work||{}).map(function(w){return '<option value="#/w/'+w.id+'"'+(route.v==="w"&&route.id===w.id?" selected":"")+'>'+w.id+' '+esc(workPath(w.id))+'</option>';}).join("");
   document.getElementById("msel").innerHTML=ms;
 }
@@ -662,8 +707,55 @@ function workPage(wid){
   es.slice().reverse().filter(function(e){return e.kind!=="brief";}).forEach(function(e){ h+=renderEntry(e,false); });
   return h+'</div>'; }
 
+/* ---------- board ---------- */
+function hue(s){ var h=0x811c9dc5; s=String(s||""); for(var i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,0x01000193)>>>0; } return h%360; }
+function initials(n){ var w=String(n||"?").replace(/^session\s+/i,"").split(/[\s_-]+/).filter(Boolean); return (w.length>1? w[0][0]+w[1][0] : (w[0]||"?").slice(0,2)).toUpperCase(); }
+function snameId(sid){ var s=B.sessions[sid]; return s? sname(s) : "Session "+String(sid).slice(0,8); }
+function av(sid, sm){ return '<span class="av'+(sm?" sm":"")+'" style="--h:'+hue(sid)+'" title="'+esc(snameId(sid))+'">'+esc(initials(snameId(sid)))+'</span>'; }
+function sesLink(sid){ return B.sessions[sid]? '<a href="#/s/'+encodeURIComponent(sid)+'" style="color:inherit;text-decoration:none"><b>'+esc(snameId(sid))+'</b></a>' : '<b>'+esc(snameId(sid))+'</b>'; }
+function toHtml(to){ return to.filter(function(t){return t!=="board";}).map(function(t){
+  if(t==="all") return '<span class="to"><span class="av sm all">∗</span>everyone</span>';
+  if(/^W-\d+$/.test(t)) return '<a class="wid" href="#/w/'+t+'" title="Whoever works on '+esc(workPath(t))+'">'+t+'</a>';
+  return '<span class="to">'+av(t,true)+esc(snameId(t))+'</span>'; }).join(" "); }
+function kb(n){ return n<1024? n+' B' : n<1048576? Math.round(n/1024)+' KB' : (n/1048576).toFixed(1)+' MB'; }
+var MKIND={finding:["finding","live"], ask:["asks to investigate","wait"]};
+function files(m){ return (m.files||[]).length? '<div class="files">'+m.files.map(function(f){ return '<a href="'+esc(f.path)+'" target="_blank" rel="noopener"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/></svg>'+esc(f.name)+'<span>'+kb(f.bytes)+(f.kept<f.bytes?' · last '+kb(f.kept):'')+'</span></a>'; }).join("")+'</div>' : ""; }
+function msgMeta(m, arrow){ var to=toHtml(m.to), k=MKIND[m.kind];
+  return '<div class="tmeta">'+(k?chip(k[0],k[1]):'')+sesLink(m.sid)+(m.wid?'<a class="wid" href="#/w/'+m.wid+'">'+m.wid+'</a>':'')+(arrow&&to?'<span>→</span>'+to:'')+'<span class="hash">'+esc(m.id.slice(0,7))+'</span><span>'+ago(m.ts)+'</span></div>'; }
+function receipts(m){ var r=(m.readBy||[]), want=m.to.filter(function(t){return B.sessions[t];});
+  if(!want.length) return r.length? '<div class="rcpt">Seen by '+r.map(snameId).map(esc).join(", ")+'</div>' : "";
+  var unread=want.filter(function(t){return r.indexOf(t)<0;});
+  return '<div class="rcpt">'+(unread.length? chip("unread by "+unread.map(snameId).join(", "),"wait") : chip("read","ok"))+'</div>'; }
+function threadHtml(m, replies, arrow){
+  var h='<article class="thread">'+av(m.sid)+'<div>'+msgMeta(m, arrow)+'<h3>'+inline(m.title)+'</h3>'+(m.body?'<div class="md">'+flag(md(m.body))+'</div>':'')+files(m)+(arrow?receipts(m):'');
+  if(replies.length) h+='<div class="replies">'+replies.map(function(r){ return '<div class="reply">'+msgMeta(r, false)+'<p class="t">'+inline(r.title)+'</p>'+(r.body?'<div class="md">'+flag(md(r.body))+'</div>':'')+'</div>'; }).join("")+'</div>';
+  return h+'</div></article>'; }
+function boardPage(){
+  var all=B.msgs||[], posts=all.filter(function(m){return m.to.indexOf("board")>=0;}), dms=all.filter(function(m){return m.to.indexOf("board")<0;});
+  var sy=B.sync, h='<div class="board"><div class="kick"><span class="label">Project board</span></div><h1 class="title">Board</h1>';
+  h+='<p class="lede">Notices every session reads, and what sessions told each other. Pinned posts are shown to each new session when it starts.</p>';
+  h+='<div class="gitline">'+(sy&&sy.head? '<span class="ref">'+esc(sy.ref)+'</span><span>@ <span class="hash">'+esc(sy.head)+'</span></span><span>'+sy.events+' events in git</span><span>synced '+ago(sy.ts)+(sy.remote?' with '+esc(sy.remote):' (local only)')+'</span>' : '<span class="ref">refs/docket/log</span><span>Not in git yet. It syncs after each turn in a git repo, or run <code>docket.py sync</code>.</span>')+'</div>';
+  var boardTab=/^#\/board\/messages/.test(location.hash)?"msgs":"board";
+  h+='<nav class="tabs" aria-label="Board views"><a href="#/board"'+(boardTab==="board"?' class="on" aria-current="page"':'')+'>Board · '+posts.filter(function(m){return !m.re;}).length+'</a><a href="#/board/messages"'+(boardTab==="msgs"?' class="on" aria-current="page"':'')+'>Messages · '+dms.length+'</a></nav>';
+  function rootsOf(list){ var by={}; list.forEach(function(m){ if(m.re){ (by[m.re]=by[m.re]||[]).push(m);} });
+    var roots=list.filter(function(m){return !m.re || !list.some(function(x){return x.id===m.re;});});
+    roots.sort(function(a,b){ var la=Math.max.apply(null,[a.ts].concat((by[a.id]||[]).map(function(r){return r.ts;}))), lb=Math.max.apply(null,[b.ts].concat((by[b.id]||[]).map(function(r){return r.ts;}))); return lb-la; });
+    return {roots:roots, by:by}; }
+  if(boardTab==="board"){
+    var pins=posts.filter(function(m){return m.pin&&!m.re;});
+    if(pins.length) h+='<div class="pins">'+pins.slice().reverse().map(function(m){ return '<div class="pin"><div class="k"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5M9 3h6l-1 7 4 3H6l4-3z"/></svg>Pinned</div><h3>'+inline(m.title)+'</h3>'+(m.body?'<div class="md">'+flag(md(m.body))+'</div>':'')+'<div class="by">'+av(m.sid,true)+esc(snameId(m.sid))+'<span class="hash">'+esc(m.id.slice(0,7))+'</span><span>'+ago(m.ts)+'</span></div></div>'; }).join("")+'</div>';
+    var t=rootsOf(posts), rest=t.roots.filter(function(m){return !m.pin||m.re;});
+    if(!posts.length) h+='<div class="empty-how">Nothing posted yet. Any session can post a notice for every other session:<pre>docket.py post "Shared box is overloaded" -b "Check load before starting a scan." --pin\ndocket.py reply &lt;id&gt; "Done, my scans have finished"</pre></div>';
+    else h+='<div class="glog">'+rest.map(function(m){ return threadHtml(m, t.by[m.id]||[], false); }).join("")+(pins.length&&!rest.length?'<p class="empty">Only pinned posts so far.</p>':'')+'</div>';
+  } else {
+    var u=rootsOf(dms);
+    if(!dms.length) h+='<div class="empty-how">No messages between sessions yet. A session can write to another by name, to everyone on a work item, or to all:<pre>docket.py msg "Gate speed" "Is the test box free?"\ndocket.py msg W-0012 "Baseline moved to 63 after the scorer fix"\ndocket.py msg all "Don\'t run two gates on one box"</pre></div>';
+    else h+='<div class="glog">'+u.roots.map(function(m){ return threadHtml(m, u.by[m.id]||[], true); }).join("")+'</div>';
+  }
+  return h+'</div>'; }
+
 /* ---------- render ---------- */
-function route(){ var m=location.hash.match(/^#\/(s|w)\/(.+)$/); if(m) return {v:m[1], id:decodeURIComponent(m[2])}; return {v:"all"}; }
+function route(){ if(/^#\/board/.test(location.hash)) return {v:"board"}; var m=location.hash.match(/^#\/(s|w)\/(.+)$/); if(m) return {v:m[1], id:decodeURIComponent(m[2])}; return {v:"all"}; }
 function render(force){
   if(!B) return;
   if(!force && B.updated===lastUpdated){ tick(); return; }
@@ -675,7 +767,7 @@ function render(force){
   document.title=(waiting?"("+waiting+") ":"")+(r.v==="s"?sname(B.sessions[r.id])+" · ":"")+B.project+" · Agent Journal";
   rail(r);
   var m=document.getElementById("main"), y=window.scrollY;
-  m.innerHTML = r.v==="s"? session(B.sessions[r.id]) : r.v==="w"? workPage(r.id) : overview();
+  m.innerHTML = r.v==="s"? session(B.sessions[r.id]) : r.v==="w"? workPage(r.id) : r.v==="board"? boardPage() : overview();
   if(!force) window.scrollTo(0,y);
   tick(); }
 function tick(){ var u=document.getElementById("upd"); if(u&&B) u.textContent=(nowS()*1000-lastSeen<8000?"Record updated ":"Record not refreshing · last ")+ago(B.updated); }

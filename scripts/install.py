@@ -21,7 +21,7 @@ EVENTS = [
     ("SessionStart", None),
     ("UserPromptSubmit", None),
     ("PreToolUse", "Agent|Task|Edit|Write|MultiEdit|NotebookEdit"),  # edits: lease check
-    ("PostToolUse", "TodoWrite|TaskCreate|TaskUpdate|ExitPlanMode|Edit|Write|MultiEdit|NotebookEdit"),
+    ("PostToolUse", None),  # every tool: task lists, plans and edits, plus mail delivered mid-turn
     ("SubagentStart", None),
     ("SubagentStop", None),
     ("Stop", None),
