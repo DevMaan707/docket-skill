@@ -22,6 +22,27 @@ you. Hooks already record prompts, task lists, plan-mode plans, edited files, an
 start, stop and output. A failing docket command is never a reason to stop working: mention it
 and carry on.
 
+## 0. You are one of a team
+
+Other sessions and their agents work in this project at the same time. Act like a member of a team,
+not a soloist:
+
+- **Know who's there.** Session start shows a `<docket-team>` list of live sessions and what each
+  one is on. `$B who` and `$B lanes` refresh it.
+- **Read the docket to refresh your context:** at the start, after `/clear` or compaction, before
+  each new piece of work, and whenever mail arrives. Use `inbox`, the board, `show W-xxxx` and
+  `audit`. Your memory of the project is older than the docket.
+- **Write your context back.** Rewrite your brief after every meaningful step (now, done, next,
+  blocked). Other sessions plan from it. A prompt reminder fires when your brief lags your work by
+  more than 30 minutes.
+- **Never reimplement.** Before building, search the docket and `git log` for the same thing.
+  `work new` stops on a matching open item, and spawning an agent warns when another session's
+  agent is already doing that job. Ask for that result instead of producing it twice.
+- **Divide, delegate and agree.** Split the work by lane or work item, say who takes what, and
+  hand independent pieces to agents. Disagree in messages, not in parallel code.
+- **Close the loop.** Report results to whoever is waiting on them. Resolve or drop the tasks you
+  own, so nothing goes stale.
+
 ## 1. Starting: read what's there, decide what still holds
 
 Never assume the docket is empty or that you are the first session, even on "initial setup".

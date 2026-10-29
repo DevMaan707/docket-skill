@@ -492,6 +492,29 @@ def main():
         check("...and redelivers it in full", "TAIL-RECOVERED" in ctx, ctx[-400:])
         shutil.rmtree(home, ignore_errors=True)
 
+        # one team, not many soloists: roster at start, warning on a duplicate agent
+        pre_agent = lambda sid, desc: run(["hook"], d, stdin=json.dumps(dict(
+            hook_event_name="PreToolUse", session_id=sid, cwd=d, tool_name="Agent",
+            tool_input={"description": desc, "prompt": desc, "subagent_type": "general-purpose"})),
+            extra_env=dict(DOCKET_MEM_GUARD="off"))[1]
+        pre_agent("sM1", "Bisect the SAST gate regression on main")
+        hook(d, "SubagentStart", "sM1", agent_id="bis1", agent_type="general-purpose")
+        out = pre_agent("sM2", "bisect SAST gate regression between two commits")
+        check("spawning an agent for a job another session's agent is doing warns", "already running elsewhere" in out, out)
+        out = pre_agent("sM2", "write release notes for the console")
+        check("an unrelated agent gets no duplicate warning", "already running elsewhere" not in out, out)
+        hook(d, "SubagentStop", "sM1", agent_id="bis1", agent_type="general-purpose")
+        ctx = hook(d, "SessionStart", "sTeam")
+        check("a new session sees who else is live and on what", "<docket-team>" in ctx and "Gate speed" in ctx, ctx[-600:])
+
+        evp = os.path.join(d, ".docket", "events.jsonl")
+        with open(evp, "a", encoding="utf-8") as f:  # an hour of work since the last brief
+            f.write(json.dumps({"id": "late0001", "sid": "sM2", "agent": "main", "kind": "note", "title": "x", "body": "",
+                                "ts": time.time() + 3600}) + "\n")
+        run(["rebuild"], d)
+        ctx = hook(d, "UserPromptSubmit", "sM2", prompt="keep going on it")
+        check("a brief that lags the work gets a nudge", "Your brief on" in ctx, ctx[-500:])
+
         # /clear: same Claude process, new session id -> it carries on as the old session
         hook(d, "SessionStart", "sClr1", pid=4242001)
         hook(d, "UserPromptSubmit", "sClr1", pid=4242001, prompt="tune the cache layer please")

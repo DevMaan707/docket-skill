@@ -1503,7 +1503,8 @@ def handle_hook(inp):
         dv = directives_block(st)
         if dv:
             emit(root, kind="directive_seen", ids=[d_["id"] for d_ in directives(st)], title="Read the directives", **E)
-        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), resumed, dv, g, pinned_block(st), digest) if x))
+        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), resumed, team_block(st, sid), dv, g,
+                                                  pinned_block(st), digest) if x))
         sync_later(root)  # pull what other machines pushed
 
     elif event == "UserPromptSubmit":
@@ -1522,7 +1523,7 @@ def handle_hook(inp):
                "sessions on their next tool call. Follow them yourself too.</docket>" % (len(added), "" if len(added) == 1 else "s")
                if added else None,
                directives_block(st, only=old, full=False) if old else None,
-               goal_block(st, full=False) if seen else None, deliver(root, sid, st)]
+               goal_block(st, full=False) if seen else None, stale_brief(st, sid), deliver(root, sid, st)]
         hook_output(event, "\n".join(x for x in ctx if x))
 
     elif event == "PreToolUse" and inp.get("tool_name") in ("Bash", "Agent", "Task"):
@@ -1531,6 +1532,14 @@ def handle_hook(inp):
             print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
                                                      "permissionDecisionReason": deny}}))
             return
+        if inp.get("tool_name") in ("Agent", "Task"):
+            ti = inp.get("tool_input") or {}
+            dup = similar_agents(load_state(root), sid, "%s %s" % (ti.get("description", ""), (ti.get("prompt") or "")[:400]))
+            if dup:
+                warn = (warn + "\n" if warn else "") + (
+                    "<docket-warning>This looks like work already running elsewhere: %s. Don't run it twice: "
+                    "ask that session for its result (msg), or narrow this agent to a part it isn't doing."
+                    "</docket-warning>" % "; ".join(dup[:3]))
         if warn:
             hook_output(event, warn)
         if inp.get("tool_name") == "Bash":
@@ -1672,10 +1681,10 @@ def _pending(root, op, sid, typ, desc="", prompt=""):
             q = [x for x in q if now() - x["ts"] < 600][-50:]
             q.append({"sid": sid, "type": typ, "desc": desc, "prompt": prompt, "ts": now()})
         else:
-            for i, x in enumerate(q):
-                if x["sid"] == sid and (x["type"] == typ or not x["type"]):
-                    res = q.pop(i)
-                    break
+            hits = [i for i, x in enumerate(q) if x["sid"] == sid and x["type"] == typ] or \
+                   [i for i, x in enumerate(q) if x["sid"] == sid and not x["type"]]
+            if hits:
+                res = q.pop(hits[0])
         with open(p, "w") as f:
             json.dump(q, f)
         return res
@@ -2214,6 +2223,55 @@ def recover_msgs(root, st, hours):
                 fixed += 1
                 break
     return "Recovered %d of %d cut-off messages; those under %g h old are redelivered." % (fixed, len(cut), hours)
+
+
+def stale_brief(st, sid):
+    """Other sessions plan from your brief: nudge when it lags your work by more than 30 minutes."""
+    s = st["sessions"].get(sid, {})
+    b = s.get("brief") if isinstance(s.get("brief"), dict) else {}
+    if not s.get("work") or s.get("progressTs", 0) - b.get("ts", s.get("started", 0)) < 1800:
+        return None
+    return ("<docket>Your brief on %s is %s behind your work. Other sessions plan from it: rewrite it (%s log brief "
+            "\"<title>\" --now --done --next --blocked --session %s), and read theirs (%s who, %s inbox) before you go on."
+            "</docket>" % (s["work"], "missing and you're well into the work" if not b else
+                           "%d min" % ((s["progressTs"] - b["ts"]) // 60), cli(), sid, cli(), cli()))
+
+
+def team_block(st, sid):
+    """Who else is live, on what: so a session starts as one of a team, not alone."""
+    me = selves(st, sid)
+    rows = []
+    for x in st["sessions"].values():
+        if x["id"] in me or not is_live(x):
+            continue
+        w = st["work"].get(x.get("work") or "")
+        lanes = [l["name"] for l in st.get("lanes", {}).values() if l["sid"] == x["id"]]
+        b = x.get("brief") if isinstance(x.get("brief"), dict) else {}
+        rows.append("- %s (%s): %s%s%s" % (x["name"] or "unnamed", x["id"][:8],
+                                          "%s %s" % (w["id"], clip(w["title"], 60)) if w else "no work item",
+                                          "; lanes " + ", ".join(lanes) if lanes else "",
+                                          "; now " + clip(b["now"], 100) if b.get("now") else ""))
+    if not rows:
+        return None
+    return "\n".join(["<docket-team>You are one of %d live sessions here, not working alone. Before you start "
+                      "something, check it isn't already theirs; if it is, message them or take another piece. "
+                      "Split work, don't duplicate it, and keep them posted:" % (len(rows) + 1)] + rows[:12] +
+                     ["</docket-team>"])
+
+
+def similar_agents(st, sid, text):
+    """Running agents in other sessions that look like the same job."""
+    want = set(re.findall(r"[a-z0-9]{4,}", (text or "").lower()))
+    hits = []
+    for x in st["sessions"].values():
+        if x["id"] in selves(st, sid) or not is_live(x):
+            continue
+        for a in x.get("agents", {}).values():
+            have = set(re.findall(r"[a-z0-9]{4,}", (a.get("desc") or "").lower()))
+            both = want & have
+            if a["status"] == "running" and len(both) >= 3 and len(both) >= 0.35 * min(len(want), len(have)):
+                hits.append("%s's agent \"%s\"" % (x["name"] or x["id"][:8], clip(a["desc"], 80)))
+    return hits
 
 
 def resume_block(st, sid, o):
