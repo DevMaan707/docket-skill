@@ -778,6 +778,10 @@ def apply(st, ev):
         for m in st.get("msgs", []):
             if m["id"] in ids and sid not in m["readBy"]:
                 m["readBy"].append(sid)
+    elif kind == "msg_unread":  # read by a listener nobody heard: deliver again
+        for m in st.get("msgs", []):
+            if m["id"] in (ev.get("ids") or []) and sid in m["readBy"]:
+                m["readBy"].remove(sid)
     elif kind == "msg_fix":  # a cut-off message's full text, recovered later
         for m in st.get("msgs", []):
             if m["id"] == ev.get("ref"):
@@ -914,7 +918,7 @@ def emit(root, _guard=None, **ev):
             _append(root, st, dict(ts=ev["ts"], id=uuid.uuid4().hex[:10], agent="main", sid=x["id"],
                                    kind="session_end", title="Session ended (process exited)"))
         _append(root, st, ev)
-        if ev["kind"] in ("msg", "msg_fix", "goal_set", "directive_add", "directive_drop"):  # lets hooks spot new mail without loading state
+        if ev["kind"] in ("msg", "msg_fix", "msg_unread", "goal_set", "directive_add", "directive_drop"):  # lets hooks spot new mail without loading state
             with open(os.path.join(bdir(root), "mail.stamp"), "w") as f:
                 f.write(ev["id"])
         s = st["sessions"].get(ev["sid"], {})
@@ -2513,6 +2517,9 @@ def main():
         p_.add_argument("-b", "--body", default="")
         p_.add_argument("--session", **sess)
         p_.add_argument("--agent", **agent_)
+    un_ = sub.add_parser("unread", help="mark messages unread for a session so its hooks deliver them again")
+    un_.add_argument("ids", nargs="+")
+    un_.add_argument("--session", **sess)
     rc_ = sub.add_parser("recover-msgs", help="restore messages cut at 200 chars from the senders' transcripts")
     rc_.add_argument("--redeliver-hours", type=float, default=6)
     ib = sub.add_parser("inbox", help="your unread messages (marks them read)")
@@ -2824,6 +2831,11 @@ def main():
         m = find_msg(st, a.ref) or sys.exit("No message with id %s." % a.ref)
         emit(root, sid=sid, kind="unpin", ref=m["id"], title="Unpinned " + m["id"])
         print("unpinned " + m["id"])
+        return 0
+    if a.cmd == "unread":
+        ids = [m["id"] for m in (find_msg(st, i) for i in a.ids) if m]
+        emit(root, sid=sid, kind="msg_unread", ids=ids, title="Marked %d messages unread" % len(ids))
+        print("marked unread for %s: %s" % (sname(st, sid), ", ".join(ids) or "none found"))
         return 0
     if a.cmd == "recover-msgs":
         print(recover_msgs(root, st, a.redeliver_hours))
