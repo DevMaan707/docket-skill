@@ -97,6 +97,19 @@ code,pre{font-family:var(--mono)}
 .files a{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--rule);border-radius:8px;padding:5px 10px;font:12.5px var(--mono);color:var(--ink2);text-decoration:none}
 .files a:hover{border-color:var(--rule2);color:var(--ink)}
 .files a span{font:11.5px var(--sans);color:var(--faint)}
+.gstat{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:12px;margin:0 0 22px}
+.gstat .box{border:1px solid var(--rule);border-radius:12px;padding:12px 14px;background:var(--paper);min-width:0}
+.gstat .box .label{display:block;margin-bottom:6px}
+.gstat ul{list-style:none;margin:0;padding:0;font:13px/1.5 var(--sans)}
+.gstat li{display:flex;gap:6px;flex-wrap:wrap;align-items:baseline;padding:3px 0;border-top:1px dashed var(--rule)}
+.gstat li:first-child{border-top:0}
+.gstat .v{font-family:var(--mono);font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.compose{border:1px solid var(--rule);border-radius:12px;padding:14px;margin:0 0 22px;background:var(--paper)}
+.compose .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.compose textarea{width:100%;box-sizing:border-box;min-height:64px;font:14px/1.45 var(--sans);padding:8px 10px;border:1px solid var(--rule);border-radius:8px;background:var(--bg);color:var(--ink);resize:vertical}
+.compose input,.compose select{flex:1 1 140px;font:13px var(--sans);padding:6px 8px;border:1px solid var(--rule);border-radius:8px;background:var(--bg);color:var(--ink);min-width:0}
+.compose button{font:600 13px var(--sans);padding:7px 12px;border-radius:8px;border:1px solid var(--link);background:var(--link);color:var(--bg);cursor:pointer}
+.compose pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:10px 0 0;font-size:12px}
 .sgoal{border:1px solid var(--rule);border-left:3px solid var(--link);border-radius:12px;padding:16px 20px;margin:18px 0 24px;background:var(--paper)}
 .sgoal .k{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font:600 10.5px var(--sans);letter-spacing:.1em;text-transform:uppercase;color:var(--link)}
 .sgoal .k .chip{margin-left:0}
@@ -515,7 +528,7 @@ function overview(){
   h+='<h1 class="masthead">Agent Journal</h1>';
   h+='<div class="dateline"><span>'+d.toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long",year:"numeric"})+'</span><span>'+list.length+' session'+(list.length===1?"":"s")+(B.updated?' · last word '+ago(B.updated):"")+'</span></div>';
   var rows=Object.values(B.index||{}), sum=function(k){ return rows.reduce(function(n,r){return n+(r[k]||0);},0); };
-  h+=directivesHtml()+goalHtml();
+  h+=directivesHtml()+goalHtml()+gateHtml();
   if(list.length) h+=tiles([
     {v:list.filter(function(s){return stateOf(s)==="working";}).length, k:"sessions writing now", tone:"live"},
     {v:list.filter(function(s){return stateOf(s)==="waiting";}).length, k:"waiting on you", tone:"wait"},
@@ -758,10 +771,43 @@ function goalHtml(){ var g=B.goal; if(!g||g.status==="cleared") return "";
   var met=g.status==="met", sw=(B.sessions||{}), who=function(id){ return sw[id]? esc(sname(sw[id])) : "session "+esc(String(id).slice(0,8)); };
   return '<section class="sgoal'+(met?" met":"")+'" aria-label="Standing goal"><div class="k">'+(met?"Goal met":"Standing goal from you")+(g.autonomous&&!met?chip("autonomous: sessions keep going","live"):"")+'</div>'+
     '<div class="md">'+md(g.text)+'</div>'+(!met&&g.thread?lanesHtml():'')+'<div class="f">Set '+ago(g.ts)+' via '+who(g.sid)+(met?' · marked met '+ago(g.endTs)+' by '+who(g.endBy)+(g.note?': '+esc(g.note):''):' · every session and agent gets it')+'</div></section>'; }
+var draft={to:"all",kind:"fyi",text:""};
+function shq(t){ return "'"+String(t).replace(/'/g,"'\\''")+"'"; }
+function draftCmd(){ var t=draft.text.trim(); if(!t) return "";
+  var first=t.split("\n")[0], rest=t.slice(first.length).trim();
+  return (B.cli||"python3 docket.py")+" msg "+shq(draft.to||"all")+" "+shq(first)+(rest?" -b "+shq(rest):"")+(draft.kind!=="fyi"?" --kind "+draft.kind:""); }
+function composeHtml(){
+  return '<section class="compose" aria-label="Message the sessions"><span class="label">Message the sessions</span>'+
+    '<textarea id="dk-text" placeholder="e.g. Freeze merges to main until the SAST gate is green" aria-label="Message">'+esc(draft.text)+'</textarea>'+
+    '<div class="row"><input id="dk-to" value="'+esc(draft.to)+'" aria-label="To: all, a session name, or W-xxxx" placeholder="all, a session, W-xxxx">'+
+    '<select id="dk-kind" aria-label="Kind"><option value="fyi"'+(draft.kind==="fyi"?" selected":"")+'>FYI</option><option value="ask"'+(draft.kind==="ask"?" selected":"")+'>Ask (they must answer)</option></select>'+
+    '<button type="button" id="dk-copy">Copy command</button></div>'+
+    '<pre id="dk-cmd">'+(esc(draftCmd())||'Run the copied command in a terminal. It arrives as a message from you, and idle sessions are woken. For rules every session must follow, start a prompt line with @all instead.')+'</pre></section>'; }
+function wireCompose(){
+  var tx=document.getElementById("dk-text"); if(!tx) return;
+  function upd(){ draft.text=tx.value; draft.to=document.getElementById("dk-to").value; draft.kind=document.getElementById("dk-kind").value;
+    document.getElementById("dk-cmd").textContent=draftCmd()||"Type a message first."; }
+  ["dk-text","dk-to","dk-kind"].forEach(function(id){ document.getElementById(id).addEventListener("input", upd); });
+  document.getElementById("dk-copy").addEventListener("click", function(){ var c=draftCmd(), b=this;
+    if(!c){ upd(); return; }
+    try{ navigator.clipboard.writeText(c).then(function(){ b.textContent="Copied"; setTimeout(function(){ b.textContent="Copy command"; },1500); }); }catch(e){} }); }
+function gateHtml(){
+  var now=Date.now()/1000, ms=B.metrics||{}, names=Object.keys(ms).sort();
+  var lk=Object.values(B.locks||{}).filter(function(l){return l.until>now;});
+  var asks=(B.msgs||[]).filter(function(m){ return m.kind==="ask" && !(B.msgs||[]).some(function(r){return r.re===m.id && r.sid!==m.sid;}); });
+  if(!names.length && !lk.length && !asks.length) return "";
+  var h='<div class="gstat">';
+  if(names.length) h+='<div class="box"><span class="label">Gates and metrics · latest</span><ul>'+names.map(function(n){ var r=ms[n][ms[n].length-1], p=ms[n].length>1?ms[n][ms[n].length-2]:null;
+    var vals=Object.keys(r.vals).map(function(k){ var v=r.vals[k], pv=p&&p.vals[k]; return k+"="+v+(typeof v==="number"&&typeof pv==="number"&&v!==pv?" ("+(v>pv?"+":"")+Math.round((v-pv)*1000)/1000+")":""); }).join(" ");
+    return '<li>'+(r.status?chip(r.status, r.status==="red"?"bad":"ok"):'')+'<b>'+esc(n)+'</b><span class="v">'+esc(vals)+(r.sha?' @'+esc(r.sha.slice(0,9)):'')+'</span><span class="v">'+ago(r.ts)+'</span></li>'; }).join("")+'</ul></div>';
+  if(lk.length) h+='<div class="box"><span class="label">Held resources</span><ul>'+lk.map(function(l){ return '<li><b>'+esc(l.name)+'</b><span>'+esc(snameId(l.sid))+'</span><span class="v">until '+new Date(l.until*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})+(l.why?' · '+esc(l.why):'')+'</span></li>'; }).join("")+'</ul></div>';
+  if(asks.length) h+='<div class="box"><span class="label">Open asks · waiting for an answer</span><ul>'+asks.slice(-8).reverse().map(function(m){ var late=now>(m.due||m.ts+3600);
+    return '<li>'+(late?chip("overdue","bad"):chip("open","wait"))+'<span>'+esc(snameId(m.sid))+' → '+toHtml(m.to)+'</span><span class="v">'+esc(m.title.slice(0,90))+'</span></li>'; }).join("")+'</ul></div>';
+  return h+'</div>'; }
 function boardPage(){
   var all=B.msgs||[], posts=all.filter(function(m){return m.to.indexOf("board")>=0;}), dms=all.filter(function(m){return m.to.indexOf("board")<0;});
   var sy=B.sync, h='<div class="board"><div class="kick"><span class="label">Project board</span></div><h1 class="title">Board</h1>';
-  h+=directivesHtml()+goalHtml();
+  h+=directivesHtml()+goalHtml()+gateHtml()+composeHtml();
   h+='<p class="lede">Notices every session reads, and what sessions told each other. Pinned posts are shown to each new session when it starts.</p>';
   h+='<div class="gitline">'+(sy&&sy.head? '<span class="ref">'+esc(sy.ref)+'</span><span>@ <span class="hash">'+esc(sy.head)+'</span></span><span>'+sy.events+' events in git</span><span>synced '+ago(sy.ts)+(sy.remote?' with '+esc(sy.remote):' (local only)')+'</span>' : '<span class="ref">refs/docket/log</span><span>Not in git yet. It syncs after each turn in a git repo, or run <code>docket.py sync</code>.</span>')+'</div>';
   var boardTab=/^#\/board\/messages/.test(location.hash)?"msgs":"board";
@@ -796,7 +842,10 @@ function render(force){
   document.title=(waiting?"("+waiting+") ":"")+(r.v==="s"?sname(B.sessions[r.id])+" · ":"")+B.project+" · Agent Journal";
   rail(r);
   var m=document.getElementById("main"), y=window.scrollY;
+  var fo=document.activeElement&&document.activeElement.id, sel=fo==="dk-text"?document.activeElement.selectionStart:null;
   m.innerHTML = r.v==="s"? session(B.sessions[r.id]) : r.v==="w"? workPage(r.id) : r.v==="board"? boardPage() : overview();
+  wireCompose();
+  if(fo&&/^dk-/.test(fo)&&document.getElementById(fo)){ var el=document.getElementById(fo); el.focus(); if(sel!==null) el.setSelectionRange(sel,sel); }
   if(!force) window.scrollTo(0,y);
   tick(); }
 function tick(){ var u=document.getElementById("upd"); if(u&&B) u.textContent=(nowS()*1000-lastSeen<8000?"Record updated ":"Record not refreshing · last ")+ago(B.updated); }

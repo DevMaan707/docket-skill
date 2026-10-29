@@ -23,7 +23,10 @@ FAILS = []
 
 
 def run(args, cwd, session=None, stdin=None, pid=None, agent=True, extra_env=None):
-    env = dict(os.environ, **(extra_env or {}))
+    env = dict(os.environ)
+    for k in ("CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "DOCKET_SESSION"):  # never poke the real session
+        env.pop(k, None)
+    env.update(extra_env or {})
     env.pop("DOCKET_ROOT", None)
     env.pop("CLAUDECODE", None)
     env.setdefault("DOCKET_LISTEN", "off")  # only the listener test turns the Stop-hook listener nudge on
@@ -397,7 +400,9 @@ def main():
         code, out = run(["audit"], d)
         check("audit lists tasks nobody owns", "NOT DONE" in out, out)
         pid = next(l.split()[1] for l in out.splitlines() if "NOT DONE" in l)
-        run(["resolve", pid], d, "sM1")
+        code, out = run(["resolve", pid], d, "sM1")
+        check("an agent can't resolve a task without evidence", code != 0 and "evidence" in out, out)
+        run(["resolve", pid], d, agent=False)
         code, out = run(["audit"], d)
         check("audit flags done-without-evidence", pid in out and "UNVERIFIED" in out, out)
         run(["reopen", pid, "--reason", "the test still fails"], d, "sM1")
@@ -500,9 +505,9 @@ def main():
         pre_agent("sM1", "Bisect the SAST gate regression on main")
         hook(d, "SubagentStart", "sM1", agent_id="bis1", agent_type="general-purpose")
         out = pre_agent("sM2", "bisect SAST gate regression between two commits")
-        check("spawning an agent for a job another session's agent is doing warns", "already running elsewhere" in out, out)
+        check("spawning an agent for a job another session's agent is doing warns", "already ran or is running" in out, out)
         out = pre_agent("sM2", "write release notes for the console")
-        check("an unrelated agent gets no duplicate warning", "already running elsewhere" not in out, out)
+        check("an unrelated agent gets no duplicate warning", "already ran or is running" not in out, out)
         hook(d, "SubagentStop", "sM1", agent_id="bis1", agent_type="general-purpose")
         ctx = hook(d, "SessionStart", "sTeam")
         check("a new session sees who else is live and on what", "<docket-team>" in ctx and "Gate speed" in ctx, ctx[-600:])
@@ -514,6 +519,105 @@ def main():
         run(["rebuild"], d)
         ctx = hook(d, "UserPromptSubmit", "sM2", prompt="keep going on it")
         check("a brief that lags the work gets a nudge", "Your brief on" in ctx, ctx[-500:])
+
+        # native wake-up: docket posts a nudge into the recipient's Claude Code inbox socket
+        import socket as socket_, threading
+        sockp = os.path.join(tempfile.mkdtemp(prefix="dk-"), "in.sock")
+        srv = socket_.socket(socket_.AF_UNIX)
+        srv.bind(sockp); srv.listen(5); srv.settimeout(10)
+        got = []
+        def serve():
+            try:
+                c, _ = srv.accept(); got.append(c.recv(65536).decode()); c.close()
+            except OSError:
+                pass
+        th = threading.Thread(target=serve); th.start()
+        run(["hook"], d, stdin=json.dumps(dict(hook_event_name="SessionStart", session_id="sWake", cwd=d)),
+            extra_env=dict(CLAUDE_CODE_MESSAGING_SOCKET=sockp))
+        run(["name", "Wake target"], d, "sWake")
+        code, out = run(["msg", "Wake target", "Your gate finished"], d, "sM2")
+        th.join(12); srv.close()
+        sw = json.load(open(os.path.join(d, ".docket", "state.json")))["sessions"].get("sWake", {})
+        line = json.loads(got[0].splitlines()[0]) if got else {}
+        check("msg wakes the recipient through its Claude Code inbox socket",
+              line.get("type") == "user" and "Your gate finished" in line["message"]["content"] and "nudged 1" in out, out + str(got) + str({k: sw.get(k) for k in ("sock", "host", "pid", "status", "name")}))
+        hook(d, "SessionEnd", "sWake")
+
+        # named resource locks
+        code, out = run(["lock", "box-2", "--minutes", "30", "--why", "SAST gate"], d, "sM1")
+        check("a session can lock a named resource", code == 0 and "locked box-2" in out, out)
+        code, out = run(["lock", "Box 2"], d, "sM2")
+        check("another session is refused while it's held, and told by whom and why",
+              code != 0 and "Gate speed" in out and "SAST gate" in out, out)
+        ctx = hook(d, "SessionStart", "sLk")
+        check("new sessions see held resources", "box-2" in ctx and "Held resources" in ctx, ctx[-500:])
+        code, out = run(["unlock", "box-2"], d, "sM2")
+        check("only the holder can release it", code != 0, out)
+        run(["unlock", "box-2"], d, "sM1")
+        code, out = run(["lock", "box-2"], d, "sM2")
+        check("a released lock can be taken", code == 0, out)
+        run(["unlock", "box-2"], d, "sM2")
+
+        # structured metrics and gate status
+        run(["metric", "sast", "fp=8", "fn=2", "precision=0.81", "--sha", "abc1234", "--status", "red"], d, "sM1")
+        code, out = run(["metric", "sast", "fp=6", "fn=2", "precision=0.86", "--sha", "def5678", "--status", "red"], d, "sM1")
+        check("a metric reports the previous value", "was fp=8" in out, out)
+        code, out = run(["metrics"], d)
+        check("metrics shows the latest values with deltas and status", "RED" in out and "fp=6 (-2)" in out and "precision=0.86 (+0.05)" in out, out)
+        ctx = hook(d, "SessionStart", "sRed")
+        check("red gates are shown to every new session", "Red: sast at def5678" in ctx, ctx[-400:])
+
+        # asks with a deadline
+        run(["msg", "Gate speed", "Can you rerun P4 on box 1?", "--kind", "ask", "--due", "0m"], d, "sM2")
+        hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})  # it read the ask
+        out = run(["hook"], d, stdin=json.dumps(dict(hook_event_name="Stop", session_id="sM1", cwd=d)),
+                  extra_env=dict(DOCKET_LISTEN="on"))[1]
+        check("an overdue ask stops the recipient from going idle without answering", "past their deadline" in out and "rerun P4" in out, out)
+        code, out = run(["asks"], d)
+        check("asks lists open asks, overdue first", "OVERDUE" in out and "rerun P4" in out, out)
+        aid = out.split("[")[1].split("]")[0]
+        run(["reply", aid, "Rerunning now, ETA 20 min"], d, "sM1")
+        check("an answered ask is no longer open", "rerun P4" not in run(["asks"], d)[1])
+
+        # a goal with a measured target
+        run(["goal", "set", "Precision on unseen repos at least 0.9", "--until", "unseen.precision>=0.9"], d, agent=False)
+        run(["metric", "unseen", "precision=0.84"], d, "sM1")
+        code, out = run(["goal"], d)
+        check("the goal shows its measured target and the latest value", "unseen.precision>=0.9" in out and "precision=0.84" in out, out)
+        run(["metric", "unseen", "precision=0.93"], d, "sM1")
+        from importlib import util as iu
+        spec = iu.spec_from_file_location("dk", DOCKET); dk = iu.module_from_spec(spec); spec.loader.exec_module(dk)
+        st_ = json.load(open(os.path.join(d, ".docket", "state.json")))
+        check("the target is detected as reached", dk.goal_target(st_)[1] is True, str(dk.goal_target(st_)))
+        run(["goal", "clear"], d, agent=False)
+
+        # dependencies and the ready queue
+        hook(d, "SessionStart", "sDep")
+        hook(d, "UserPromptSubmit", "sDep", prompt="plan the schema then the api")
+        run(["work", "new", "Schema migration v2", "-k", "schema", "--top-level"], d, "sDep")
+        code, out = run(["work", "new", "API on schema v2", "-k", "api", "--top-level", "--blocked-by", "W-0001"], d, "sDep")
+        wid_api = out.split()[1]
+        hook(d, "SessionEnd", "sDep")
+        code, out = run(["ready"], d)
+        check("blocked work isn't offered as ready", wid_api not in out, out)
+
+        # the commit guard
+        pre_edit(d, "sM1", os.path.join(d, "src", "billing.py"))
+        out = run(["hook"], d, stdin=json.dumps(dict(hook_event_name="PreToolUse", session_id="sM2", cwd=d, tool_name="Bash",
+                                                     tool_input={"command": "git add src/billing.py && git commit -m wip"})))[1]
+        check("a commit that takes another session's leased file is refused", '"deny"' in out and "src/billing.py" in out, out)
+        out = run(["hook"], d, stdin=json.dumps(dict(hook_event_name="PreToolUse", session_id="sM2", cwd=d, tool_name="Bash",
+                                                     tool_input={"command": "git commit -m 'docker build fixes' README.md"})))[1]
+        check("a commit of its own files passes", "deny" not in out, out)
+
+        # small things
+        code, out = run(["mgs", "x"], d)
+        check("a mistyped command gets a did-you-mean, not a usage dump", code != 0 and "Did you mean msg" in out and "usage:" not in out, out)
+        code, out = run(["log", "deadend", "LRU cache for the scanner", "-b", "tried it: no gain, hit rate 3%"], d, "sM1")
+        check("dead ends can be logged", code == 0, out)
+        code, out = run(["msg", "all", "Freeze merges until 5pm"], d, agent=False)
+        ctx = hook(d, "PostToolUse", "sM2", tool_name="Bash", tool_input={"command": "ls"})
+        check("a message from a terminal is from the user", "from You (from a terminal)" in ctx and "Freeze merges" in ctx, ctx[-400:])
 
         # /clear: same Claude process, new session id -> it carries on as the old session
         hook(d, "SessionStart", "sClr1", pid=4242001)
@@ -542,6 +646,7 @@ def main():
         check("an idle session is asked to start the listener", '"block"' in out and "listen --session sM1" in out, out)
         check("...but only once per stop", "decision" not in stopL("sM1", stop_hook_active=True))
         env = dict(os.environ, DOCKET_LISTEN="on", CLAUDECODE="1", CLAUDE_PID=str(os.getpid()))
+        env.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
         env.pop("DOCKET_ROOT", None)
         lp = subprocess.Popen([sys.executable, DOCKET, "listen", "--session", "sM1"], cwd=d, env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

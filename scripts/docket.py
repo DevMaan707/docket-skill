@@ -117,7 +117,7 @@ CHARTER = """How to work under it (autonomous mode, set by the user):
 MSG_KINDS = {"fyi": "FYI", "finding": "FINDING (verify before acting)", "ask": "ASKS YOU TO ACT"}
 SYNC_REF = "refs/docket/log"  # the record's git history, kept off every branch
 ENTRY_KINDS = ["plan", "decision", "status", "blocker", "unblock", "done", "summary",
-               "note", "fact", "review", "brief", "output", "task"]
+               "note", "fact", "review", "brief", "output", "task", "deadend"]
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 WORK_TYPES = ["theme", "feature", "optimization", "improvement", "bug", "investigation",
               "refactor", "research", "chore"]
@@ -630,6 +630,10 @@ def apply(st, ev):
         s["pid"], s["host"] = ev["pid"], ev.get("host")
     if kind in PROGRESS_KINDS:  # what counts as doing something, for the goal's keep-going
         s["progressTs"] = ts
+    if sid == "user" and not s["name"]:
+        s["name"] = "You (from a terminal)"
+    if ev.get("sock"):
+        s["sock"] = ev["sock"]  # Claude Code's inbox socket: docket wakes the session through it
     if kind == "session_start":
         s["status"] = "idle"
         if ev.get("name") and not s["name"]:
@@ -647,13 +651,28 @@ def apply(st, ev):
                 if l.get("sid") == o["id"]:
                     l["sid"] = sid
             o["status"], o["next"] = "ended", sid
+    elif kind == "lock":
+        st.setdefault("locks", {})[ev["key"]] = {"name": title, "sid": sid, "ts": ts, "until": ev["until"], "why": body}
+    elif kind == "unlock":
+        st.get("locks", {}).pop(ev["key"], None)
+    elif kind == "metric":
+        st.setdefault("metrics", {}).setdefault(title, []).append(
+            {"vals": ev.get("vals") or {}, "sha": ev.get("sha", ""), "box": ev.get("box", ""), "status": ev.get("status", ""),
+             "note": body, "sid": sid, "ts": ts})
+        st["metrics"][title] = st["metrics"][title][-20:]
+    elif kind == "work_block":
+        w = work_item(st, ev["wid"])
+        if w:
+            b = [x for x in w.get("blockedBy", []) if x != ev["on"]]
+            w["blockedBy"] = b if ev.get("drop") else b + [ev["on"]]
     elif kind == "name":
         s["name"] = title
     elif kind == "prompt":
         s["prompt"], s["status"], s["promptTs"], s["continues"] = body, "working", ts, 0
     elif kind == "goal_set":
         st["goal"] = {"id": ev["id"], "text": body, "ts": ts, "sid": sid, "status": "active",
-                      "autonomous": bool(ev.get("autonomous")), "note": "", "thread": ev.get("thread")}
+                      "autonomous": bool(ev.get("autonomous")), "note": "", "thread": ev.get("thread"),
+                      "until": ev.get("until") or ""}
         st["lanes"] = {}
     elif kind == "lane":
         key = _norm(title) or title.lower()
@@ -682,6 +701,8 @@ def apply(st, ev):
         s["status"] = "idle"
     elif kind == "session_end":
         drop_leases(st, lambda l, k: l["sid"] == sid)
+        for k in [k for k, l in st.get("locks", {}).items() if l["sid"] == sid]:
+            del st["locks"][k]
         s["status"] = "ended"
         for ag in s["agents"].values():
             if ag["status"] == "running":
@@ -781,7 +802,7 @@ def apply(st, ev):
         st.setdefault("msgs", []).append(dict(
             id=ev["id"], ts=ts, sid=sid, agent=who, to=ev.get("to") or ["board"], title=title,
             body=body, re=ev.get("re"), pin=bool(ev.get("pin")), wid=s.get("work"), readBy=[],
-            kind=ev.get("msgKind") or "fyi", files=ev.get("files") or [], wids=ev.get("wids") or []))
+            kind=ev.get("msgKind") or "fyi", files=ev.get("files") or [], wids=ev.get("wids") or [], due=ev.get("due")))
         st["msgs"] = st["msgs"][-MAX_MSGS:]
         for t in ev.get("wids") or []:  # an ask is a pending task on these items
             if t in st["work"]:
@@ -880,6 +901,7 @@ def save_state(root, st):
             st["sync"] = json.load(f)
     except (OSError, ValueError):
         pass
+    st["cli"] = cli()  # the viewer builds copyable commands with it
     data = json.dumps(st, ensure_ascii=False)
     for name, content in (("state.json", data), ("data.js", "window.__BOARD__ = " + data + ";\n")):
         tmp = os.path.join(d, name + ".tmp")
@@ -1022,6 +1044,7 @@ def work_report(root, st, wid):
     return {"w": w, "entries": entries, "active": active, "files": files, "facts": facts,
             "brief": briefs[-1] if briefs else None,
             "decisions": [e for e in entries if e["kind"] == "decision"],
+            "deadends": [e for e in active if e["kind"] == "deadend"],
             "reviews": [e for e in entries if e["kind"] == "review"],
             "blockers": [e for e in active if e["kind"] == "blocker" and not e.get("resolved")],
             "summaries": [e for e in active if e["kind"] in ("summary", "output")],
@@ -1036,7 +1059,7 @@ def selves(st, sid):
 
 def sname(st, sid):
     s = st["sessions"].get(sid)
-    return (s and s["name"]) or "session " + sid[:8]
+    return (s and s["name"]) or ("the user" if sid == "user" else "session " + sid[:8])
 
 
 def prov(st, e):
@@ -1146,6 +1169,12 @@ def render_page(root, st, wid):
         if e.get("rejected") and not e.get("supersededBy"):
             A("  - Rejected: " + flag_suspicious(e["rejected"]))
     A("")
+    if r["deadends"]:
+        A("## Dead ends  _(tried and failed: don't retry without a new reason)_")
+        for e in r["deadends"]:
+            A("- **%s**%s  _(%s)_" % (e["title"], ": " + flag_suspicious(e["body"]).replace("\n", " ") if e.get("body") else "",
+                                      prov(st, e)))
+        A("")
     if r["corrected"]:
         A("## Corrected claims  _(superseded; do not rely on them)_")
         for e in r["corrected"][-10:]:
@@ -1318,6 +1347,20 @@ def agent_name(inp):
     return "%s:%s" % (typ, str(aid)[:6]), typ
 
 
+class Parser(argparse.ArgumentParser):
+    """Short errors with a did-you-mean, instead of a full usage dump."""
+    def error(self, message):
+        import difflib
+        m = re.search(r"invalid choice: '([^']+)'", message)
+        hint = ""
+        if m:
+            opts = re.findall(r"'([^']+)'", message.split("choose from", 1)[-1])
+            near = difflib.get_close_matches(m.group(1), opts, n=2)
+            hint = " Did you mean %s?" % " or ".join(near) if near else ""
+        sys.stderr.write("%s: %s.%s Run `%s -h` for the options.\n" % (self.prog, message, hint, self.prog))
+        sys.exit(2)
+
+
 def cli():
     return '%s "%s"' % ("python" if os.name == "nt" else "python3", SCRIPT)
 
@@ -1486,7 +1529,8 @@ def handle_hook(inp):
             except OSError:
                 pass
         _, st = emit(root, kind="session_start", title="Session " + inp.get("source", "start"),
-             name=os.environ.get("DOCKET_NAME", ""), pid=claude_pid(), host=socket.gethostname(), **E)
+             name=os.environ.get("DOCKET_NAME", ""), pid=claude_pid(), host=socket.gethostname(),
+             sock=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""), **E)
         resumed = None
         if inp.get("source") == "clear":  # same Claude process, new session id: take over the old identity
             me = st["sessions"][sid]
@@ -1510,12 +1554,14 @@ def handle_hook(inp):
     elif event == "UserPromptSubmit":
         prompt = inp.get("prompt") or ""
         _, st = emit(root, kind="prompt", title=clip(prompt, 120), body=clip(prompt, 8000),
-                     pid=claude_pid(), host=socket.gethostname(), **E)
+                     pid=claude_pid(), host=socket.gethostname(), sock=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""), **E)
         mail_waiting(root, sid)  # mark checked; the mail itself goes out below
         added = []
         for line in re.findall(r"(?im)^\s*@all\b[:,]?\s*(.+)$", prompt):  # the user's own words, via the hook
             ev_, st = emit(root, kind="directive_add", title=clip(line, 200), body=clip(line, 4000), **E)
             added.append(ev_["id"])
+            wake(st, dict(ev_, to=["all"]), "[docket] The user added a directive for every session: %s\nFollow it from "
+                 "now on (`%s directives`)." % (clip(line, 400), cli()))
         seen = st.get("goal") and st["sessions"][sid].get("goalSeen") == st["goal"]["id"]
         old = [d_["id"] for d_ in directives(st) if d_["id"] in st["sessions"][sid].get("dirSeen", [])]
         ctx = [prior_work_block(root, st, sid, prompt) if prompt.strip() else None,
@@ -1537,11 +1583,21 @@ def handle_hook(inp):
             dup = similar_agents(load_state(root), sid, "%s %s" % (ti.get("description", ""), (ti.get("prompt") or "")[:400]))
             if dup:
                 warn = (warn + "\n" if warn else "") + (
-                    "<docket-warning>This looks like work already running elsewhere: %s. Don't run it twice: "
-                    "ask that session for its result (msg), or narrow this agent to a part it isn't doing."
+                    "<docket-warning>This looks like work another session already ran or is running: %s. Don't run it "
+                    "twice: read its result or ask that session (msg), or narrow this agent to a part it isn't doing."
                     "</docket-warning>" % "; ".join(dup[:3]))
         if warn:
             hook_output(event, warn)
+        if inp.get("tool_name") == "Bash" and os.environ.get("DOCKET_COMMIT_GUARD") != "off":
+            paths_ = committed_paths(root, (inp.get("tool_input") or {}).get("command"))
+            st_ = load_state(root) if paths_ else None
+            held = [(p_, l) for p_ in paths_ for _, l in [blocking_lease(st_, rel(root, p_) or p_, sid, who)] if l]
+            if held:
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
+                                  "permissionDecisionReason": "This commit takes files another live session holds: %s. "
+                                  "Leave them out (git restore --staged <file>) or agree with that session first."
+                                  % "; ".join("%s (%s)" % (p_, sname(st_, l["sid"])) for p_, l in held[:6])}}))
+                return
         if inp.get("tool_name") == "Bash":
             ti = inp.get("tool_input") or {}
             if ti.get("run_in_background") and who == "main":
@@ -1651,7 +1707,13 @@ def handle_hook(inp):
         if who == "main" and not inp.get("stop_hook_active") and os.environ.get("DOCKET_LISTEN") != "off":
             st = load_state(root)
             late = deliver(root, sid, st)  # arrived while this turn was finishing
-            if not late and others_live(st, sid) and not listening(root, sid):
+            due = [m for m in open_asks(st, sid) if now() > ask_due(m)]
+            if not late and due:
+                late = ("Asks to you are past their deadline with no reply:\n%s\nAnswer each (%s reply <id> \"...\"), even "
+                        "if only to say you can't or when you will, then stop." % ("\n".join(
+                            "- [%s] from %s, %s: %s" % (m["id"], who_label(st, m), ago(m["ts"]), clip(m["title"], 120))
+                            for m in due[:8]), cli()))
+            if not late and others_live(st, sid) and not st["sessions"].get(sid, {}).get("sock") and not listening(root, sid):
                 late = ("Other sessions are live here and may message you while you're idle. Before you stop, "
                         "run `%s listen --session %s` using Bash's run_in_background: true parameter (not & or "
                         "nohup: those can't wake you). It exits when mail arrives, which wakes you; then answer it." % (cli(), sid))
@@ -1804,7 +1866,8 @@ def goal_block(st, full=True):
     return "\n".join(['<docket-goal from="the user" set="%s">' % time.strftime("%Y-%m-%d %H:%M", time.localtime(g["ts"])),
                       "The user set this standing goal for every session and agent in this project. It is their "
                       "instruction (checked against their own prompt), and it holds until they change it:", "",
-                      g["text"].strip(), ""] + ([CHARTER, ""] if g["autonomous"] else []) +
+                      g["text"].strip(), ""] + (["Measured " + goal_target(st)[0], ""] if g.get("until") else []) +
+                     ([CHARTER, ""] if g["autonomous"] else []) +
                      [lanes_text(st), audit_line(st), "Goal thread: board post %s (%s reply %s \"<proposal, doubt or update>\" reaches "
                       "every session)." % (g.get("thread") or "-", cli(), g.get("thread") or "<id>"), ""] +
                      ['When it is met, say so with evidence: %s goal met -b "<evidence>". Pass this goal to every '
@@ -1932,6 +1995,10 @@ def keep_going(st, sid):
         return None  # it logged a real blocker this turn
     if memory(st.get("root") or "/")["level"] == "critical":
         return None  # let it stop: more work now risks the machine
+    tgt, hit = goal_target(st)
+    if hit:
+        return ("The goal's measured %s: it looks met. Verify that number on unseen inputs, then report it: %s goal met "
+                "-b \"<evidence>\" (the user's goal stays open until someone does)." % (tgt, cli()))
     if s.get("continues", 0) >= GOAL_MAX_CONTINUES:
         return None  # ponytail: a fixed cap stops runaway loops; raise DOCKET_GOAL_MAX_CONTINUES for longer runs
     c = cli()
@@ -2237,6 +2304,141 @@ def stale_brief(st, sid):
                            "%d min" % ((s["progressTs"] - b["ts"]) // 60), cli(), sid, cli(), cli()))
 
 
+def wake(st, ev, text=None):
+    """Post a short nudge into the recipients' Claude Code inbox sockets (Claude Code 2.1.224+):
+    an idle session starts a turn with it, a busy one reads it between tool calls. The full text
+    still arrives through the hooks; this only makes sure nobody sleeps through it."""
+    if os.environ.get("DOCKET_WAKE") == "off":
+        return 0
+    me, to = selves(st, ev["sid"]), set(ev.get("to") or ["all"])
+    host, n = socket.gethostname(), 0
+    for x in st["sessions"].values():
+        if x["id"] in me or x["status"] == "ended" or not x.get("sock") or x.get("host") != host or process_gone(x):
+            continue
+        wids = {w for w, it in st["work"].items() if any(y["sid"] in selves(st, x["id"]) for y in it["sessions"])}
+        if not ("all" in to or selves(st, x["id"]) & to or wids & to):
+            continue
+        line = text or ("[docket] %s from %s: %s\nRead it with `%s inbox --session %s` (it also arrives with your next "
+                        "tool call), then answer with `%s reply %s \"...\"`."
+                        % (MSG_KINDS.get(ev.get("msgKind"), "Message"), sname(st, ev["sid"]),
+                           clip(flag_suspicious(ev.get("title", "")), 160), cli(), x["id"], cli(), ev.get("id", "<id>")))
+        try:
+            c = socket.socket(socket.AF_UNIX)
+            c.settimeout(2)
+            c.connect(x["sock"])
+            c.sendall((json.dumps({"type": "user", "message": {"role": "user", "content": line}}) + "\n").encode())
+            c.close()
+            n += 1
+        except (OSError, AttributeError):
+            pass
+    return n
+
+
+def lock_holder(st, key, sid):
+    """The live lock another session holds on a named resource (a box, a port, the gate)."""
+    l = st.get("locks", {}).get(key)
+    if not l or l["sid"] in selves(st, sid) or now() >= l["until"]:
+        return None
+    s = st["sessions"].get(l["sid"])
+    return None if not s or s["status"] == "ended" or process_gone(s) else l
+
+
+def locks_text(st):
+    rows = [(k, l) for k, l in st.get("locks", {}).items() if now() < l["until"]]
+    return ["- %s: %s until %s%s" % (l["name"], sname(st, l["sid"]), time.strftime("%H:%M", time.localtime(l["until"])),
+                                     " (%s)" % clip(l["why"], 80) if l["why"] else "") for k, l in rows]
+
+
+def metric_vals(text):
+    vals = {}
+    for kv in text:
+        k, _, v = kv.partition("=")
+        try:
+            vals[k] = float(v) if "." in v or "e" in v.lower() else int(v)
+        except ValueError:
+            vals[k] = v
+    return vals
+
+
+def latest_metric(st, name):
+    rows = st.get("metrics", {}).get(name) or []
+    return rows[-1] if rows else None
+
+
+GOAL_UNTIL = re.compile(r"^\s*([\w.-]+)\.(\w+)\s*(>=|<=|>|<|==)\s*(-?[\d.]+)\s*$")
+
+
+def goal_target(st):
+    """(text, reached) for a goal set with --until "<metric>.<key> >= N", from the latest metric."""
+    g = st.get("goal") or {}
+    m = GOAL_UNTIL.match(g.get("until") or "")
+    if not m:
+        return None, False
+    name, key, op, want = m.group(1), m.group(2), m.group(3), float(m.group(4))
+    row = latest_metric(st, name)
+    have = row and row["vals"].get(key)
+    if not isinstance(have, (int, float)):
+        return "target %s (no %s.%s metric yet: %s metric %s %s=<value>)" % (g["until"], name, key, cli(), name, key), False
+    hit = {">=": have >= want, "<=": have <= want, ">": have > want, "<": have < want, "==": have == want}[op]
+    return "target %s, now %s=%s (%s ago%s)" % (g["until"], key, have, ago(row["ts"]).replace(" ago", ""),
+                                               ", at " + row["sha"][:9] if row["sha"] else ""), hit
+
+
+def open_asks(st, sid=None):
+    """Asks nobody they went to has answered yet; with sid, only the ones addressed to that session."""
+    msgs, out = st.get("msgs", []), []
+    for m in msgs:
+        if m.get("kind") != "ask":
+            continue
+        answered = {r["sid"] for r in msgs if r["re"] == m["id"] and r["sid"] != m["sid"]}
+        if answered:
+            continue
+        if any(i["status"] in ("done", "dropped") for w in m.get("wids", []) if w in st["work"]
+               for i in pending_items(st, w) if i["pid"] == "A-" + m["id"][:6]):
+            continue
+        if sid:
+            me = selves(st, sid)
+            wids = {w for w, it in st["work"].items() if any(y["sid"] in me for y in it["sessions"])}
+            if m["sid"] in me or not (me & set(m["to"]) or wids & set(m["to"]) or "all" in m["to"]):
+                continue
+        out.append(m)
+    return out
+
+
+def ask_due(m):
+    return m.get("due") or m["ts"] + 3600
+
+
+def ready_work(st):
+    """Open work items nobody live is on whose blockers are all closed, with their open tasks."""
+    out = []
+    for w in st["work"].values():
+        if w["status"] != "open" or live_sessions(st, w["id"]):
+            continue
+        if any(st["work"].get(b, {}).get("status") == "open" for b in w.get("blockedBy", [])):
+            continue
+        out.append((w, [i for i in pending_items(st, w["id"]) if i["status"] == "open"]))
+    out.sort(key=lambda x: -x[0]["updated"])
+    return out
+
+
+def committed_paths(root, cmd):
+    """Files a `git commit` in this command would take: staged ones, tracked changes with -a, paths it git-adds."""
+    if not re.search(r"\bgit\b[^\n;&|]*\bcommit\b", cmd or ""):
+        return []
+    paths = set()
+    for args in (["diff", "--cached", "--name-only"], ["diff", "--name-only"] if re.search(r"\bcommit\b[^\n;&|]*\s-\w*a", cmd) else None):
+        if args:
+            r = git(root, *args, timeout=10)
+            paths |= set(r.stdout.decode(errors="replace").split()) if r.returncode == 0 else set()
+    for m in re.finditer(r"\bgit\s+add\s+([^\n;&|]+)", cmd):
+        try:
+            paths |= {t for t in shlex.split(m.group(1)) if not t.startswith("-") and t != "."}
+        except ValueError:
+            pass
+    return sorted(paths)
+
+
 def team_block(st, sid):
     """Who else is live, on what: so a session starts as one of a team, not alone."""
     me = selves(st, sid)
@@ -2251,11 +2453,20 @@ def team_block(st, sid):
                                           "%s %s" % (w["id"], clip(w["title"], 60)) if w else "no work item",
                                           "; lanes " + ", ".join(lanes) if lanes else "",
                                           "; now " + clip(b["now"], 100) if b.get("now") else ""))
-    if not rows:
+    lk = locks_text(st)
+    red = ["%s at %s" % (n, r[-1]["sha"][:9] or ago(r[-1]["ts"])) for n, r in st.get("metrics", {}).items()
+           if r and r[-1]["status"] == "red"]
+    asks = [m for m in open_asks(st, sid) if now() > ask_due(m)]
+    extra = (["Held resources (%s lock <name> to take one when free):" % cli()] + lk if lk else []) + \
+            (["Red: " + "; ".join(red)] if red else []) + \
+            (["Overdue asks to you: " + "; ".join("[%s] %s" % (m["id"], clip(m["title"], 60)) for m in asks)] if asks else [])
+    if not rows and not extra:
         return None
+    if not rows:
+        return "\n".join(["<docket-team>"] + extra + ["</docket-team>"])
     return "\n".join(["<docket-team>You are one of %d live sessions here, not working alone. Before you start "
                       "something, check it isn't already theirs; if it is, message them or take another piece. "
-                      "Split work, don't duplicate it, and keep them posted:" % (len(rows) + 1)] + rows[:12] +
+                      "Split work, don't duplicate it, and keep them posted:" % (len(rows) + 1)] + rows[:12] + extra +
                      ["</docket-team>"])
 
 
@@ -2269,8 +2480,11 @@ def similar_agents(st, sid, text):
         for a in x.get("agents", {}).values():
             have = set(re.findall(r"[a-z0-9]{4,}", (a.get("desc") or "").lower()))
             both = want & have
-            if a["status"] == "running" and len(both) >= 3 and len(both) >= 0.35 * min(len(want), len(have)):
-                hits.append("%s's agent \"%s\"" % (x["name"] or x["id"][:8], clip(a["desc"], 80)))
+            recent = a["status"] != "running" and a.get("ended") and now() - a["ended"] < 7200
+            if (a["status"] == "running" or recent) and len(both) >= 3 and len(both) >= 0.35 * min(len(want), len(have)):
+                hits.append("%s's agent \"%s\"%s" % (x["name"] or x["id"][:8], clip(a["desc"], 80),
+                                                     " (finished %s; its output is in the docket)" % ago(a["ended"])
+                                                     if recent else " (running)"))
     return hits
 
 
@@ -2517,7 +2731,7 @@ def resolve_wid(st, wid):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="docket.py", description="docket: session record + work index")
+    ap = Parser(prog="docket.py", description="docket: session record + work index")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sess = dict(default=os.environ.get("DOCKET_SESSION"))
     sub.add_parser("hook")
@@ -2547,7 +2761,13 @@ def main():
     wn.add_argument("--parent", help="put it under this work item (an area or bigger task)")
     wn.add_argument("--type", choices=WORK_TYPES, help="inferred from the title if omitted")
     wn.add_argument("--top-level", action="store_true", help="skip the related-item suggestion")
+    wn.add_argument("--blocked-by", default="", help="comma-separated work items that must close first")
     wn.add_argument("--session", **sess)
+    wb = wsub.add_parser("block", help="W-a can't start until W-b is closed")
+    wb.add_argument("wid")
+    wb.add_argument("--on", required=True)
+    wb.add_argument("--drop", action="store_true", help="remove that dependency")
+    wb.add_argument("--session", **sess)
     wm = wsub.add_parser("move", help="re-parent a work item (use 'none' for top level)")
     wm.add_argument("wid")
     wm.add_argument("parent")
@@ -2613,6 +2833,7 @@ def main():
     ms.add_argument("--kind", choices=sorted(MSG_KINDS), default="fyi",
                     help="fyi: make them aware; finding: you found the cause; ask: they should investigate (tracked as a pending task)")
     ms.add_argument("--attach", nargs="+", default=[], help="files to hand over, e.g. a build log")
+    ms.add_argument("--due", help="ask: when you need the answer, e.g. 30m or 2h (default 1h)")
     po = sub.add_parser("post", help="post a notice to the project board every session sees")
     po.add_argument("title")
     po.add_argument("--pin", action="store_true", help="show it to every new session until unpinned")
@@ -2653,6 +2874,27 @@ def main():
     wt_.add_argument("what")
     wt_.add_argument("--minutes", type=int, default=30)
     wt_.add_argument("--session", **sess)
+    lk_ = sub.add_parser("lock", help="hold a named resource (a test box, a port, the gate) so nobody else uses it")
+    lk_.add_argument("name")
+    lk_.add_argument("--minutes", type=int, default=60)
+    lk_.add_argument("--why", default="")
+    lk_.add_argument("--session", **sess)
+    ul_ = sub.add_parser("unlock", help="release a named resource")
+    ul_.add_argument("name")
+    ul_.add_argument("--session", **sess)
+    sub.add_parser("locks", help="who holds which named resources")
+    mt_ = sub.add_parser("metric", help="record a measurement: metric sast fp=6 fn=2 --sha abc --status green")
+    mt_.add_argument("name")
+    mt_.add_argument("vals", nargs="+", help="key=value pairs")
+    mt_.add_argument("--sha", default="")
+    mt_.add_argument("--box", default="")
+    mt_.add_argument("--status", choices=["green", "red", ""], default="")
+    mt_.add_argument("-b", "--body", default="")
+    mt_.add_argument("--session", **sess)
+    mx_ = sub.add_parser("metrics", help="latest value of every metric and gate, with the change since the one before")
+    mx_.add_argument("name", nargs="?")
+    sub.add_parser("asks", help="asks nobody has answered yet, overdue first")
+    sub.add_parser("ready", help="work nobody is on whose blockers are closed: pick from here when idle")
     ls_ = sub.add_parser("listen", help="wait for mail (run in the background): exits when a message arrives, waking you")
     ls_.add_argument("--hours", type=float, default=12)
     ls_.add_argument("--session", **sess)
@@ -2666,6 +2908,7 @@ def main():
                     help="sessions keep working toward it without waiting for permission, delegate, and don't stop until it's met")
     gl.add_argument("--prompt-from", action="append", default=[],
                     help="another project whose record holds the user's prompt (when set from a session elsewhere)")
+    gl.add_argument("--until", default="", help='set: a measured target, e.g. "unseen.precision>=0.90" (checked against docket metric)')
     gl.add_argument("--session", **sess)
     sy = sub.add_parser("sync", help="commit the record to git (refs/docket/log); with a remote, pull and push it")
     sy.add_argument("--remote", help="git remote to share through (remembered as docket.remote)")
@@ -2781,6 +3024,8 @@ def main():
         return 1 if bad else 0
 
     sid = getattr(a, "session", None) or latest_session(st) or "manual"
+    if a.cmd in ("msg", "post", "reply") and not getattr(a, "session", None) and "CLAUDECODE" not in os.environ:
+        sid = "user"  # typed in a terminal (or copied from the viewer): it's the user talking
     if a.cmd in ("msg", "post", "reply"):
         re_, pin = None, a.cmd == "post" and a.pin
         if a.cmd == "reply":
@@ -2813,6 +3058,10 @@ def main():
         body = a.body
         if len(a.title or "") > 200:  # the whole message went in the title: keep all of it in the body
             body = a.title + ("\n\n" + body if body else "")
+        if a.cmd == "msg" and a.kind == "ask":
+            m_ = re.fullmatch(r"(\d+)\s*([mh]?)", (getattr(a, "due", None) or "60m").strip())
+            m_ or sys.exit("--due takes minutes or hours, e.g. 30m or 2h.")
+            extra["due"] = now() + int(m_.group(1)) * (3600 if m_.group(2) == "h" else 60)
         ev, st = emit(root, id=mid, sid=sid, agent=a.agent, kind="msg", to=to, title=clip(a.title, 200),
                       body=clip(body, 6000), re=re_, pin=pin, **extra)
         print("sent %s %s to %s%s%s" % (ev["msgKind"], ev["id"], to_label(st, ev["to"]), " (pinned)" if pin else "",
@@ -2820,6 +3069,10 @@ def main():
         for t in ev["to"]:
             if t.startswith("W-") and not live_sessions(st, t, exclude=sid):
                 print("  nobody live has worked on %s; it waits for whoever picks it up" % t)
+        if set(ev["to"]) != {"board"}:
+            n_ = wake(st, ev)
+            if n_:
+                print("  nudged %d session%s through Claude Code's inbox" % (n_, "" if n_ == 1 else "s"))
         if ev.get("wids"):
             print("  tracked as pending task A-%s on %s" % (mid[:6], ", ".join(ev["wids"])))
         return 0
@@ -2914,8 +3167,12 @@ def main():
             post, _ = emit(root, sid=sid, kind="msg", to=["board", "all"], pin=True, title="Goal: " + clip(text, 160),
                            body="Discuss, divide and report here. Reply with what you propose to own, your doubts, "
                                 "and progress updates with numbers.")
+            if a.until and not GOAL_UNTIL.match(a.until):
+                sys.exit('--until takes "<metric>.<key> >= <number>", e.g. "unseen.precision>=0.90".')
             ev, st = emit(root, sid=sid, kind="goal_set", title=clip(text, 200), body=clip(text, 6000),
-                          autonomous=a.autonomous, thread=post["id"])
+                          autonomous=a.autonomous, thread=post["id"], until=a.until)
+            wake(st, dict(post, to=["all"]), "[docket] The user set a standing goal for every session: %s\nRead it with "
+                 "`%s goal` and join the thread." % (clip(text, 400), cli()))
             print("standing goal set (%s); every session and agent gets it now, live ones mid-turn"
                   % ("autonomous: sessions keep going until it's met" if a.autonomous else "reminder only"))
             return 0
@@ -2937,6 +3194,71 @@ def main():
         m = find_msg(st, a.ref) or sys.exit("No message with id %s." % a.ref)
         emit(root, sid=sid, kind="unpin", ref=m["id"], title="Unpinned " + m["id"])
         print("unpinned " + m["id"])
+        return 0
+    if a.cmd == "lock":
+        key = _norm(a.name) or a.name.lower()
+        l = lock_holder(st, key, sid)
+        if l:
+            sys.exit("%s is held by %s until %s%s. Ask them (msg) or wait; `%s locks` shows every holder." % (
+                a.name, sname(st, l["sid"]), time.strftime("%H:%M", time.localtime(l["until"])),
+                " for: " + l["why"] if l["why"] else "", cli()))
+        emit(root, sid=sid, kind="lock", key=key, title=clip(a.name, 80), body=clip(a.why, 300),
+             until=now() + max(1, a.minutes) * 60)
+        print("locked %s for %d min; release it with: unlock %s" % (a.name, a.minutes, a.name))
+        return 0
+    if a.cmd == "unlock":
+        key = _norm(a.name) or a.name.lower()
+        l = st.get("locks", {}).get(key)
+        if l and l["sid"] not in selves(st, sid) and "CLAUDECODE" in os.environ and lock_holder(st, key, sid):
+            sys.exit("%s is held by %s; only they (or the user) can release it." % (a.name, sname(st, l["sid"])))
+        emit(root, sid=sid, kind="unlock", key=key, title=clip(a.name, 80))
+        print("released %s" % a.name)
+        return 0
+    if a.cmd == "locks":
+        print("\n".join(locks_text(st)) or "No named resources are held.")
+        return 0
+    if a.cmd == "metric":
+        vals = metric_vals(a.vals)
+        prev = latest_metric(st, a.name)
+        emit(root, sid=sid, kind="metric", title=clip(a.name, 80), vals=vals, sha=a.sha, box=a.box, status=a.status,
+             body=clip(a.body, 1000))
+        print("recorded %s %s%s" % (a.name, " ".join("%s=%s" % kv for kv in vals.items()),
+                                     "  (was %s)" % " ".join("%s=%s" % kv for kv in prev["vals"].items()) if prev else ""))
+        return 0
+    if a.cmd == "metrics":
+        names = [a.name] if a.name else sorted(st.get("metrics", {}))
+        for n_ in names:
+            rows = st.get("metrics", {}).get(n_) or []
+            if not rows:
+                print("%s: no measurements" % n_)
+                continue
+            cur, prev = rows[-1], rows[-2] if len(rows) > 1 else None
+            def d(k, v):
+                pv = prev and prev["vals"].get(k)
+                return "%s=%s%s" % (k, v, " (%+g)" % (v - pv) if isinstance(v, (int, float)) and isinstance(pv, (int, float))
+                                    and v != pv else "")
+            print("%-18s %-6s %s  %s%s%s, %s" % (n_, cur["status"].upper(), " ".join(d(k, v) for k, v in cur["vals"].items()),
+                                                sname(st, cur["sid"]), " @" + cur["sha"][:9] if cur["sha"] else "",
+                                                " on " + cur["box"] if cur["box"] else "", ago(cur["ts"])))
+        if not names:
+            print("No metrics yet. Record one: metric <name> key=value ... [--sha] [--box] [--status green|red]")
+        return 0
+    if a.cmd == "asks":
+        rows = sorted(open_asks(st), key=ask_due)
+        for m in rows:
+            late = now() > ask_due(m)
+            print("%s [%s] from %s to %s, %s: %s" % ("OVERDUE" if late else "open   ", m["id"], who_label(st, m),
+                                                    to_label(st, m["to"]), ago(m["ts"]), clip(m["title"], 100)))
+        print("" if rows else "No open asks.", end="\n" if not rows else "")
+        return 0
+    if a.cmd == "ready":
+        rows = ready_work(st)
+        for w, tasks in rows[:15]:
+            print("%s  %s%s" % (w["id"], breadcrumb(st, w["id"]), "" if not tasks else "  (%d open tasks)" % len(tasks)))
+            for i in tasks[:5]:
+                print("    %s  %s" % (i["pid"], i["subject"]))
+        print("Take one with: work attach W-xxxx, then adopt its tasks." if rows else "Nothing is ready: every open item has "
+              "a live session or an open blocker.")
         return 0
     if a.cmd == "unread":
         ids = [m["id"] for m in (find_msg(st, i) for i in a.ids) if m]
@@ -2992,6 +3314,9 @@ def main():
     if a.cmd in ("adopt", "resolve", "drop", "reopen"):
         if a.cmd in ("drop", "reopen") and not a.reason:
             sys.exit("%s needs --reason, so the next session knows why." % a.cmd)
+        if a.cmd == "resolve" and not a.reason and "CLAUDECODE" in os.environ:
+            sys.exit("resolve needs --reason with the evidence it's done (a commit, a test or gate result, a file:line), "
+                     "so nobody has to redo the check.")
         status = {"adopt": "adopted", "resolve": "done", "drop": "dropped", "reopen": "reopened"}[a.cmd]
         if a.cmd == "adopt":  # critique before following: no adopting unreviewed work
             for wid in {find_pending(st, p)[0] for p in a.pids} - {None}:
@@ -3045,8 +3370,19 @@ def main():
             ev, st = emit(root, sid=sid, kind="work_new", wid="__new__", title=clip(a.title, 120),
                           keywords=kws, head=git_head(root), parent=parent, type=a.type)
             w = st["work"][ev["wid"]]
+            for b in [x for x in a.blocked_by.split(",") if x.strip()]:
+                on = resolve_wid(st, b.strip())
+                if on:
+                    _, st = emit(root, sid=sid, kind="work_block", wid=ev["wid"], on=on)
             print("created %s (%s) %s; this session is attached to it" % (
                 ev["wid"], w["type"], breadcrumb(st, ev["wid"])))
+        elif a.wcmd == "block":
+            wid = resolve_wid(st, a.wid) or sys.exit("No such work item: %s" % a.wid)
+            on = resolve_wid(st, a.on) or sys.exit("No such work item: %s" % a.on)
+            if wid == on:
+                sys.exit("A work item can't wait on itself.")
+            emit(root, sid=sid, kind="work_block", wid=wid, on=on, drop=a.drop)
+            print("%s %s %s" % (wid, "no longer waits on" if a.drop else "waits on", on))
         elif a.wcmd == "attach":
             wid = resolve_wid(st, a.wid) or sys.exit("No such work item: %s" % a.wid)
             live = live_sessions(st, wid, exclude=sid)

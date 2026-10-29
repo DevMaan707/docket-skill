@@ -109,6 +109,22 @@ through hooks with no server:
 
 The journal's **Board** page shows pinned notices, threads and messages with read receipts.
 
+## Resources, numbers and order
+
+- **Wake-ups through Claude Code:** with Claude Code 2.1.224 or later, a message, a directive or a
+  goal posts a nudge into the recipient's inbox socket, so idle sessions answer without a listener.
+- **Named locks:** `lock box-2 --minutes 40 --why "SAST gate"` holds a test box, port or gate.
+  Others are refused and told who holds it and why.
+- **Metrics:** `metric sast fp=6 fn=2 --sha abc --status red` records a measurement. `metrics`
+  shows each gate's latest value and its change. A goal can carry `--until "sast.precision>=0.9"`.
+- **Asks with deadlines:** `--kind ask --due 30m`, plus an `asks` view. An overdue ask keeps its
+  recipient from going idle until it answers.
+- **Dependencies:** `--blocked-by` and `work block`, and a `ready` queue for idle sessions.
+- **Commit guard:** a commit that takes another live session's files is refused.
+- **Evidence and dead ends:** `resolve` needs evidence, and `log deadend` records what failed.
+- **Duplicate-agent warning:** it covers agents that finished in the last two hours too.
+- **Messages from you:** the Board page builds a `msg` command for you to copy and run.
+
 ## Protects the machine
 
 Many sessions, subagents and builds on one machine can exhaust memory and, once swap fills the
