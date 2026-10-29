@@ -1713,7 +1713,8 @@ def handle_hook(inp):
                         "if only to say you can't or when you will, then stop." % ("\n".join(
                             "- [%s] from %s, %s: %s" % (m["id"], who_label(st, m), ago(m["ts"]), clip(m["title"], 120))
                             for m in due[:8]), cli()))
-            if not late and others_live(st, sid) and not st["sessions"].get(sid, {}).get("sock") and not listening(root, sid):
+            if not late and others_live(st, sid) and not os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") \
+                    and not st["sessions"].get(sid, {}).get("sock") and not listening(root, sid):
                 late = ("Other sessions are live here and may message you while you're idle. Before you stop, "
                         "run `%s listen --session %s` using Bash's run_in_background: true parameter (not & or "
                         "nohup: those can't wake you). It exits when mail arrives, which wakes you; then answer it." % (cli(), sid))
