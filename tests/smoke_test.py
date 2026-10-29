@@ -462,6 +462,11 @@ def main():
         code, out = run(["mem"], d)
         check("mem shows headroom and the biggest processes", code == 0 and "Biggest processes" in out, out)
 
+        long_ = "I own P4 and object to step 3 " + "x" * 300 + " END-OF-LONG-TITLE"
+        run(["msg", "Gate speed", long_], d, "sM2")
+        ctx = hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})
+        check("a long message passed as the title isn't cut off", "END-OF-LONG-TITLE" in ctx, ctx[-400:])
+
         # idle sessions: a background listener wakes them when mail arrives
         on = dict(DOCKET_LISTEN="on")
         stopL = lambda sid, **kw: run(["hook"], d, stdin=json.dumps(dict(hook_event_name="Stop", session_id=sid,

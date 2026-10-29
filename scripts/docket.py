@@ -2627,8 +2627,11 @@ def main():
         mid = uuid.uuid4().hex[:10]
         if getattr(a, "attach", None):
             extra["files"] = attach(root, mid, a.attach)
+        body = a.body
+        if len(a.title or "") > 200:  # the whole message went in the title: keep all of it in the body
+            body = a.title + ("\n\n" + body if body else "")
         ev, st = emit(root, id=mid, sid=sid, agent=a.agent, kind="msg", to=to, title=clip(a.title, 200),
-                      body=clip(a.body, 6000), re=re_, pin=pin, **extra)
+                      body=clip(body, 6000), re=re_, pin=pin, **extra)
         print("sent %s %s to %s%s%s" % (ev["msgKind"], ev["id"], to_label(st, ev["to"]), " (pinned)" if pin else "",
                                        "".join("\n  attached %s (%s)" % (f["path"], attach_note(f)) for f in ev.get("files", []))))
         if ev.get("wids"):
