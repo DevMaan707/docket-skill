@@ -492,6 +492,24 @@ def main():
         check("...and redelivers it in full", "TAIL-RECOVERED" in ctx, ctx[-400:])
         shutil.rmtree(home, ignore_errors=True)
 
+        # /clear: same Claude process, new session id -> it carries on as the old session
+        hook(d, "SessionStart", "sClr1", pid=4242001)
+        hook(d, "UserPromptSubmit", "sClr1", pid=4242001, prompt="tune the cache layer please")
+        run(["name", "Cache tuning"], d, "sClr1", pid=4242001)
+        run(["work", "new", "Cache tuning", "-k", "cache"], d, "sClr1", pid=4242001)
+        run(["log", "brief", "Cache", "--now", "profiling misses", "--next", "try LRU size 4k"], d, "sClr1", pid=4242001)
+        hook(d, "SessionEnd", "sClr1", pid=4242001, reason="clear")
+        run(["msg", "Cache tuning", "Your hit rate dropped to 40%"], d, "sM2")
+        ctx = hook(d, "SessionStart", "sClr2", pid=4242001, source="clear")
+        check("after /clear the new id takes over the old identity",
+              "<docket-resume>" in ctx and "Cache tuning" in ctx and "try LRU size 4k" in ctx, ctx[-800:])
+        ctx = hook(d, "PostToolUse", "sClr2", pid=4242001, tool_name="Bash", tool_input={"command": "ls"})
+        check("...and gets mail sent to its old id", "hit rate dropped" in ctx, ctx[-400:])
+        code, out = run(["msg", "Cache tuning", "ping"], d, "sM2")
+        check("...and answers to its old name", code == 0, out)
+        ctx = hook(d, "SessionStart", "sClr3", pid=4242999, source="clear")
+        check("a different process doesn't inherit it", "<docket-resume>" not in ctx, ctx[-300:])
+
         # idle sessions: a background listener wakes them when mail arrives
         on = dict(DOCKET_LISTEN="on")
         stopL = lambda sid, **kw: run(["hook"], d, stdin=json.dumps(dict(hook_event_name="Stop", session_id=sid,

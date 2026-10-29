@@ -144,6 +144,11 @@ met or they log a real blocker (capped at 10 turns in a row). `audit` lists task
 stale ones, ones marked done without evidence, and items whose tasks are all finished; `reopen`
 puts back a task that was marked done but isn't.
 
+## Surviving /clear
+
+A cleared session keeps its identity: the same Claude process gets a new session id, and docket
+hands it the old name, work item, lanes, leases and mail, plus a resume block with its last brief.
+
 ## The record is in git
 
 Like [git-bug](https://github.com/git-bug/git-bug) and GitLoom, the record lives in git:

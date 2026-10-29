@@ -263,6 +263,13 @@ lets it stop when it logged a blocker that turn, is waiting on its own subagents
 job (`run_in_background`, or `$B wait "<what>" --minutes N`), or its last forced turn did nothing. Sessions on
 other work just see the goal. `DOCKET_GOAL_STOP=off` turns the keep-going off.
 
+## 4c2. After /clear you are the same session
+
+/clear gives the Claude process a new session id. Docket links the two: the new id takes the old
+name, work item, lanes, leases and mail, and gets a `<docket-resume>` block with your last brief.
+Read your work item (`show W-xxxx`) and `audit` before carrying on, and check your own old notes
+against the code like anyone else's.
+
 ## 4d. The record is in git
 
 `events.jsonl` and the work pages are committed after every turn to `refs/docket/log`, a ref

@@ -634,6 +634,19 @@ def apply(st, ev):
         s["status"] = "idle"
         if ev.get("name") and not s["name"]:
             s["name"] = ev["name"]
+    elif kind == "succeed":  # /clear gave this Claude process a new session id: it carries on as the old one
+        o = st["sessions"].get(ev.get("ref"))
+        if o and o["id"] != sid:
+            s["prev"] = o.get("prev", []) + [o["id"]]
+            s["name"], o["name"] = s["name"] or o["name"], (o["name"] + " (before /clear)") if o["name"] else ""
+            s["work"], s["goalSeen"], s["dirSeen"] = o["work"], o.get("goalSeen"), list(o.get("dirSeen", []))
+            w = st["work"].get(o["work"] or "")
+            if w and sid not in [x["sid"] for x in w["sessions"]]:
+                w["sessions"].append({"sid": sid, "role": "continue", "ts": ts})
+            for l in list(st.get("lanes", {}).values()) + list(st.get("leases", {}).values()):
+                if l.get("sid") == o["id"]:
+                    l["sid"] = sid
+            o["status"], o["next"] = "ended", sid
     elif kind == "name":
         s["name"] = title
     elif kind == "prompt":
@@ -981,11 +994,12 @@ def fact_trust(root, e):
 def needs_review(st, wid, sid):
     """Work started by other sessions that this session hasn't critiqued yet."""
     w = st["work"].get(wid)
-    if not w or w.get("createdBy") == sid:
+    me = selves(st, sid)
+    if not w or w.get("createdBy") in me:
         return False
     es = [e for _, e in all_entries(st, wid)]
-    return (any(e["sid"] != sid for e in es)
-            and not any(e["kind"] == "review" and e["sid"] == sid for e in es))
+    return (any(e["sid"] not in me for e in es)
+            and not any(e["kind"] == "review" and e["sid"] in me for e in es))
 
 
 def work_report(root, st, wid):
@@ -1013,6 +1027,11 @@ def work_report(root, st, wid):
             "summaries": [e for e in active if e["kind"] in ("summary", "output")],
             "plans": [e for e in active if e["kind"] == "plan"],
             "corrected": [e for e in entries if e.get("supersededBy") and e["kind"] != "decision"]}
+
+
+def selves(st, sid):
+    """This session and the ones it continues after /clear."""
+    return {sid, *st["sessions"].get(sid, {}).get("prev", [])}
 
 
 def sname(st, sid):
@@ -1468,6 +1487,15 @@ def handle_hook(inp):
                 pass
         _, st = emit(root, kind="session_start", title="Session " + inp.get("source", "start"),
              name=os.environ.get("DOCKET_NAME", ""), pid=claude_pid(), host=socket.gethostname(), **E)
+        resumed = None
+        if inp.get("source") == "clear":  # same Claude process, new session id: take over the old identity
+            me = st["sessions"][sid]
+            olds = [x for x in st["sessions"].values() if x["id"] != sid and x.get("pid") == me.get("pid")
+                    and x.get("host") == me.get("host") and not x.get("next")]
+            if olds:
+                o = max(olds, key=lambda x: x["last"])
+                _, st = emit(root, kind="succeed", ref=o["id"], title="Continues %s after /clear" % sname(st, o["id"]), **E)
+                resumed = resume_block(st, sid, o)
         digest = None if st["sessions"].get(sid, {}).get("work") else open_work_digest(root, st, sid)
         g = goal_block(st)
         if g:
@@ -1475,7 +1503,7 @@ def handle_hook(inp):
         dv = directives_block(st)
         if dv:
             emit(root, kind="directive_seen", ids=[d_["id"] for d_ in directives(st)], title="Read the directives", **E)
-        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), dv, g, pinned_block(st), digest) if x))
+        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), resumed, dv, g, pinned_block(st), digest) if x))
         sync_later(root)  # pull what other machines pushed
 
     elif event == "UserPromptSubmit":
@@ -1680,10 +1708,10 @@ def find_msg(st, mid):
 
 def inbox(st, sid):
     """Unread mail for a session: to it, to its work item, to all; board posts since it started."""
-    s = st["sessions"].get(sid, {})
-    mine = {sid, "all", "board", s.get("work")} - {None}
-    mine |= {w for w, x in st["work"].items() if any(y["sid"] == sid for y in x.get("sessions", []))}  # moved on, still its owner
-    return [m for m in st.get("msgs", []) if m["sid"] != sid and sid not in m["readBy"]
+    s, me = st["sessions"].get(sid, {}), selves(st, sid)
+    mine = me | {"all", "board", s.get("work")} - {None}
+    mine |= {w for w, x in st["work"].items() if any(y["sid"] in me for y in x.get("sessions", []))}  # moved on, still its owner
+    return [m for m in st.get("msgs", []) if m["sid"] not in me and not me & set(m["readBy"])
             and mine & set(m["to"]) and not (set(m["to"]) <= {"board", "all"} and m["ts"] < s.get("started", 0))]
 
 
@@ -2186,6 +2214,26 @@ def recover_msgs(root, st, hours):
                 fixed += 1
                 break
     return "Recovered %d of %d cut-off messages; those under %g h old are redelivered." % (fixed, len(cut), hours)
+
+
+def resume_block(st, sid, o):
+    s, c = st["sessions"][sid], cli()
+    lanes = [l["name"] for l in st.get("lanes", {}).values() if l["sid"] == sid]
+    b = o.get("brief") or {}
+    out = ["<docket-resume>The context was cleared, but you are the same session: you continue %s (%s)."
+           % (s["name"] or "session " + o["id"][:8], o["id"][:8])]
+    if s["work"]:
+        out.append("Your work item: %s, %s. Read it first: %s show %s" % (
+            s["work"], st["work"][s["work"]]["title"], c, s["work"]))
+    if lanes:
+        out.append("Your lanes: " + ", ".join(lanes))
+    if isinstance(b, dict) and any(b.get(k) for k in ("now", "next", "blocked")):
+        out.append("Your last brief: now %s; next %s%s" % (b.get("now") or "-", b.get("next") or "-",
+                                                            "; blocked " + b["blocked"] if b.get("blocked") else ""))
+    out.append("Unfinished tasks from before the clear are in `%s audit`. Mail to your old id reaches you. "
+               "Treat your own old notes as claims too: check them against the code before you build on them."
+               "</docket-resume>" % c)
+    return "\n".join(out)
 
 
 def pinned_block(st):
