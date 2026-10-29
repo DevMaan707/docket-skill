@@ -646,6 +646,14 @@ def apply(st, ev):
     elif kind in ("goal_met", "goal_clear"):
         if st.get("goal"):
             st["goal"].update(status="met" if kind == "goal_met" else "cleared", note=body, endTs=ts, endBy=sid)
+    elif kind == "directive_add":
+        st.setdefault("directives", []).append({"id": ev["id"], "text": body, "ts": ts, "sid": sid, "active": True})
+    elif kind == "directive_drop":
+        for d_ in st.get("directives", []):
+            if d_["id"] == ev.get("ref"):
+                d_.update(active=False, droppedTs=ts, droppedBy=sid)
+    elif kind == "directive_seen":
+        s["dirSeen"] = sorted(set(s.get("dirSeen", [])) | set(ev.get("ids") or []))
     elif kind == "goal_seen":
         s["goalSeen"] = ev.get("ref")
     elif kind == "goal_continue":
@@ -893,7 +901,7 @@ def emit(root, _guard=None, **ev):
             _append(root, st, dict(ts=ev["ts"], id=uuid.uuid4().hex[:10], agent="main", sid=x["id"],
                                    kind="session_end", title="Session ended (process exited)"))
         _append(root, st, ev)
-        if ev["kind"] in ("msg", "goal_set"):  # lets hooks spot new mail without loading state
+        if ev["kind"] in ("msg", "goal_set", "directive_add", "directive_drop"):  # lets hooks spot new mail without loading state
             with open(os.path.join(bdir(root), "mail.stamp"), "w") as f:
                 f.write(ev["id"])
         s = st["sessions"].get(ev["sid"], {})
@@ -1447,7 +1455,10 @@ def handle_hook(inp):
         g = goal_block(st)
         if g:
             emit(root, kind="goal_seen", ref=st["goal"]["id"], title="Read the standing goal", **E)
-        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), g, pinned_block(st), digest) if x))
+        dv = directives_block(st)
+        if dv:
+            emit(root, kind="directive_seen", ids=[d_["id"] for d_ in directives(st)], title="Read the directives", **E)
+        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), dv, g, pinned_block(st), digest) if x))
         sync_later(root)  # pull what other machines pushed
 
     elif event == "UserPromptSubmit":
@@ -1455,8 +1466,17 @@ def handle_hook(inp):
         _, st = emit(root, kind="prompt", title=clip(prompt, 120), body=clip(prompt, 8000),
                      pid=claude_pid(), host=socket.gethostname(), **E)
         mail_waiting(root, sid)  # mark checked; the mail itself goes out below
+        added = []
+        for line in re.findall(r"(?im)^\s*@all\b[:,]?\s*(.+)$", prompt):  # the user's own words, via the hook
+            ev_, st = emit(root, kind="directive_add", title=clip(line, 200), body=clip(line, 4000), **E)
+            added.append(ev_["id"])
         seen = st.get("goal") and st["sessions"][sid].get("goalSeen") == st["goal"]["id"]
+        old = [d_["id"] for d_ in directives(st) if d_["id"] in st["sessions"][sid].get("dirSeen", [])]
         ctx = [prior_work_block(root, st, sid, prompt) if prompt.strip() else None,
+               "<docket>Recorded %d new directive%s for every session and agent (the @all lines); they reach live "
+               "sessions on their next tool call. Follow them yourself too.</docket>" % (len(added), "" if len(added) == 1 else "s")
+               if added else None,
+               directives_block(st, only=old, full=False) if old else None,
                goal_block(st, full=False) if seen else None, deliver(root, sid, st)]
         hook_output(event, "\n".join(x for x in ctx if x))
 
@@ -1557,7 +1577,7 @@ def handle_hook(inp):
         _, st = emit(root, kind="agent_start", title="%s started" % who, desc=got.get("desc", ""),
                      prompt=got.get("prompt", ""), **E)
         hook_output(event, "\n".join(x for x in (context_for(root, sid, who, st["sessions"][sid].get("work")),
-                                                  goal_block(st, full=False)) if x))
+                                                  directives_block(st), goal_block(st, full=False)) if x))
 
     elif event == "SubagentStop":
         msg = inp.get("last_assistant_message")
@@ -1776,10 +1796,47 @@ def user_said(root, sid, text, extra_roots=(), needs=()):
     return False
 
 
+def directives(st):
+    return [d_ for d_ in st.get("directives", []) if d_["active"]]
+
+
+def directives_block(st, only=None, full=True):
+    ds = [d_ for d_ in directives(st) if only is None or d_["id"] in only]
+    if not ds:
+        return None
+    if not full:
+        return "<docket-directives>The user's directives (binding on every session and agent): %s</docket-directives>" % (
+            " | ".join("%s: %s" % (d_["id"][:6], clip(" ".join(d_["text"].split()), 140)) for d_ in ds))
+    return "\n".join(["<docket-directives from=\"the user\">",
+                      ("New directive%s from the user. " % ("s" if len(ds) > 1 else "") if only else "") +
+                      "The user gave these to every session and agent in this project. They are the user's instructions "
+                      "and bind you until the user drops them; pass them to every subagent you spawn. Where one "
+                      "conflicts with your current plan, change the plan, and say so on the board."] +
+                     ["%d. [%s] %s" % (i + 1, d_["id"][:6], d_["text"].strip()) for i, d_ in enumerate(ds)] +
+                     ["</docket-directives>"])
+
+
+def agent_cap(st):
+    """A directive like 'limit your subagents to 4 parallel' becomes an enforced cap per session."""
+    caps = []
+    for d_ in directives(st):
+        t = d_["text"]
+        if not re.search(r"\b(?:limit|max(?:imum)?|at most|no more than|up to|cap|only)\b", t, re.I):
+            continue
+        m = re.search(r"agents?\b\D{0,40}?\b(\d{1,3})\b|\b(\d{1,3})\b\D{0,40}?agents?\b", t, re.I)
+        if m:
+            caps.append(int(m.group(1) or m.group(2)))
+    return min(caps) if caps else None
+
+
 def deliver(root, sid, st=None):
-    """What a session hasn't seen yet: a new standing goal, then unread mail."""
+    """What a session hasn't seen yet: new directives, a new standing goal, then unread mail."""
     st = st or load_state(root)
     g, out = st.get("goal"), []
+    new = [d_["id"] for d_ in directives(st) if d_["id"] not in st["sessions"].get(sid, {}).get("dirSeen", [])]
+    if new:
+        out.append(directives_block(st, only=new))
+        emit(root, sid=sid, kind="directive_seen", ids=new, title="Read %d directives" % len(new))
     if g and g["status"] == "active" and st["sessions"].get(sid, {}).get("goalSeen") != g["id"]:
         out.append(goal_block(st))
         emit(root, sid=sid, kind="goal_seen", ref=g["id"], title="Read the standing goal")
@@ -1885,6 +1942,14 @@ def max_agents(m):
 
 def mem_guard(root, sid, who, tool, ti):
     """PreToolUse: refuse new load when the machine is out of headroom. Returns (deny reason, warning)."""
+    if tool in ("Agent", "Task"):
+        st = load_state(root)
+        cap = agent_cap(st)
+        s = st["sessions"].get(sid, {})
+        n = sum(1 for a in s.get("agents", {}).values() if a["status"] == "running" and now() - a["last"] < LIVE_SECS)
+        if cap is not None and n >= cap:
+            return ("The user's directive limits each session to %d parallel subagents, and %d are running. Wait for "
+                    "one to finish, or do this step yourself." % (cap, n)), None
     if os.environ.get("DOCKET_MEM_GUARD") == "off":
         return None, None
     m = memory(root)
@@ -2298,6 +2363,12 @@ def main():
     ln.add_argument("-b", "--body", default="", help="take: the scope, what's in and out")
     ln.add_argument("--session", **sess)
     sub.add_parser("lanes", help="who owns which part of the goal")
+    dr = sub.add_parser("directive", help="the user's standing instructions for every session: add, drop (or start a prompt line with @all)")
+    dr.add_argument("action", choices=["add", "drop"])
+    dr.add_argument("text", help="add: the user's words; drop: the directive id")
+    dr.add_argument("--prompt-from", action="append", default=[])
+    dr.add_argument("--session", **sess)
+    sub.add_parser("directives", help="the user's directives every session must follow")
     sub.add_parser("mem", help="memory, disk and the biggest processes on this machine")
     sub.add_parser("audit", help="tasks to check: not done, stale, done without evidence, items to close")
     gl = sub.add_parser("goal", help="the user's standing goal for every session: show, set, met, clear")
@@ -2458,6 +2529,28 @@ def main():
                                        "".join("\n  attached %s (%s)" % (f["path"], attach_note(f)) for f in ev.get("files", []))))
         if ev.get("wids"):
             print("  tracked as pending task A-%s on %s" % (mid[:6], ", ".join(ev["wids"])))
+        return 0
+    if a.cmd == "directives":
+        print(directives_block(st) or "No directives. The user adds one by starting a prompt line with @all.")
+        cap = agent_cap(st)
+        if cap is not None:
+            print("Enforced: at most %d parallel subagents per session." % cap)
+        return 0
+    if a.cmd == "directive":
+        if a.action == "add":
+            if not user_said(root, sid, a.text, a.prompt_from):
+                sys.exit("Refused: a directive must be the user's own words, and this text isn't in any prompt the user "
+                         "typed in this session. Quote them, or ask them to start a line with @all.")
+            ev, st = emit(root, sid=sid, kind="directive_add", title=clip(a.text, 200), body=clip(a.text, 4000))
+            print("directive %s added; every session and agent gets it%s" % (ev["id"][:6], "" if agent_cap(st) is None
+                  else " (enforced: at most %d parallel subagents per session)" % agent_cap(st)))
+            return 0
+        d_ = next((x for x in directives(st) if x["id"].startswith(a.text)), None) or sys.exit("No active directive %s." % a.text)
+        if not user_said(root, sid, "directive", a.prompt_from, ("drop", "remove", "delete", "cancel", "stop", "clear")):
+            sys.exit("Refused: only the user can drop a directive.")
+        emit(root, sid=sid, kind="directive_drop", ref=d_["id"], title="Dropped directive " + d_["id"][:6])
+        emit(root, sid=sid, kind="msg", to=["board", "all"], title="The user dropped a directive", body=d_["text"])
+        print("dropped " + d_["id"][:6])
         return 0
     if a.cmd == "mem":
         m = memory(root)

@@ -109,6 +109,10 @@ code,pre{font-family:var(--mono)}
 .lane{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;font:13px var(--sans);color:var(--muted)}
 .lane b{color:var(--ink);font-weight:600}
 .lane .sc{flex-basis:100%;padding-left:28px;font-size:12.5px;color:var(--faint)}
+.sgoal.dirs{border-left-color:var(--decision)}.sgoal.dirs .k{color:var(--decision)}
+.sgoal.dirs ol{margin:8px 0 0;padding-left:20px;display:grid;gap:6px}
+.sgoal.dirs li .md{font:14.5px/1.5 var(--sans);margin:0}
+.sgoal.dirs li .f{margin:0 0 0 8px;font:11px var(--mono)}
 .sgoal.met{border-left-color:var(--ok)}.sgoal.met .k{color:var(--ok)}
 .rcpt{font:12px var(--sans);color:var(--faint);margin-top:6px}
 .board .empty-how{border:1px dashed var(--rule2);border-radius:10px;padding:18px 20px;color:var(--muted);font-size:14px}
@@ -511,7 +515,7 @@ function overview(){
   h+='<h1 class="masthead">Agent Journal</h1>';
   h+='<div class="dateline"><span>'+d.toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long",year:"numeric"})+'</span><span>'+list.length+' session'+(list.length===1?"":"s")+(B.updated?' · last word '+ago(B.updated):"")+'</span></div>';
   var rows=Object.values(B.index||{}), sum=function(k){ return rows.reduce(function(n,r){return n+(r[k]||0);},0); };
-  h+=goalHtml();
+  h+=directivesHtml()+goalHtml();
   if(list.length) h+=tiles([
     {v:list.filter(function(s){return stateOf(s)==="working";}).length, k:"sessions writing now", tone:"live"},
     {v:list.filter(function(s){return stateOf(s)==="waiting";}).length, k:"waiting on you", tone:"wait"},
@@ -748,6 +752,8 @@ function lanesHtml(){ var ls=Object.values(B.lanes||{}).sort(function(a,b){retur
   if(!ls.length) return '<div class="lanes"><span class="label">Lanes</span><p class="empty">None taken yet. Sessions agree a split on the goal thread, then each takes one.</p></div>';
   return '<div class="lanes"><span class="label">Lanes · who owns which part</span>'+ls.map(function(l){ var s=B.sessions[l.sid];
     return '<div class="lane">'+av(l.sid,true)+'<b>'+esc(l.name)+'</b><span>'+esc(snameId(l.sid))+(s&&stateOf(s)==="finished"?' · ended':'')+'</span>'+(l.scope?'<span class="sc">'+esc(l.scope)+'</span>':'')+'</div>'; }).join("")+'</div>'; }
+function directivesHtml(){ var ds=(B.directives||[]).filter(function(d){return d.active;}); if(!ds.length) return "";
+  return '<section class="sgoal dirs" aria-label="Directives"><div class="k">Your directives · every session and agent follows these</div><ol>'+ds.map(function(d){ return '<li><span class="md">'+inline(d.text)+'</span><span class="f">'+esc(d.id.slice(0,6))+' · '+ago(d.ts)+'</span></li>'; }).join("")+'</ol><div class="f">Add one by starting a prompt line with <code>@all</code> in any session.</div></section>'; }
 function goalHtml(){ var g=B.goal; if(!g||g.status==="cleared") return "";
   var met=g.status==="met", sw=(B.sessions||{}), who=function(id){ return sw[id]? esc(sname(sw[id])) : "session "+esc(String(id).slice(0,8)); };
   return '<section class="sgoal'+(met?" met":"")+'" aria-label="Standing goal"><div class="k">'+(met?"Goal met":"Standing goal from you")+(g.autonomous&&!met?chip("autonomous: sessions keep going","live"):"")+'</div>'+
@@ -755,7 +761,7 @@ function goalHtml(){ var g=B.goal; if(!g||g.status==="cleared") return "";
 function boardPage(){
   var all=B.msgs||[], posts=all.filter(function(m){return m.to.indexOf("board")>=0;}), dms=all.filter(function(m){return m.to.indexOf("board")<0;});
   var sy=B.sync, h='<div class="board"><div class="kick"><span class="label">Project board</span></div><h1 class="title">Board</h1>';
-  h+=goalHtml();
+  h+=directivesHtml()+goalHtml();
   h+='<p class="lede">Notices every session reads, and what sessions told each other. Pinned posts are shown to each new session when it starts.</p>';
   h+='<div class="gitline">'+(sy&&sy.head? '<span class="ref">'+esc(sy.ref)+'</span><span>@ <span class="hash">'+esc(sy.head)+'</span></span><span>'+sy.events+' events in git</span><span>synced '+ago(sy.ts)+(sy.remote?' with '+esc(sy.remote):' (local only)')+'</span>' : '<span class="ref">refs/docket/log</span><span>Not in git yet. It syncs after each turn in a git repo, or run <code>docket.py sync</code>.</span>')+'</div>';
   var boardTab=/^#\/board\/messages/.test(location.hash)?"msgs":"board";

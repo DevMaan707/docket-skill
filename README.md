@@ -114,6 +114,13 @@ and free disk. When it's critical, new agents and heavy commands are refused (fr
 still works) and every session is told. When it's tight, heavy jobs get a warning and new
 subagents are capped at about one per 2 GB of RAM. `docket.py mem` shows the biggest processes.
 
+## Directives from the user
+
+Start any prompt line with `@all` and it becomes a directive every session and agent must follow:
+`@all limit your subagents to 4 parallel`, `@all every test must report FP, FN and join accuracy
+on unseen repos`. Live sessions get it mid-turn, subagents get it at start, and each prompt
+carries a short reminder. Subagent limits are enforced. Agents can't invent or drop directives.
+
 ## A standing goal, divided between sessions
 
 `docket.py goal set "<the user's words>" --autonomous` gives every session and agent the user's

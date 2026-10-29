@@ -199,6 +199,27 @@ machine at a time; cap its parallelism and memory (`-j2`, `GOMAXPROCS`, `-Xmx`,
 agents you no longer need. Tune with `DOCKET_MEM_WARN`/`DOCKET_MEM_CRIT` (% RAM free),
 `DOCKET_DISK_WARN_GB`/`DOCKET_DISK_CRIT_GB`, `DOCKET_MAX_AGENTS`; `DOCKET_MEM_GUARD=off` disables it.
 
+## 4b3. The user's directives bind every session
+
+The user can give instructions that every session and subagent must follow, from any session, by
+starting a prompt line with `@all`:
+
+```text
+@all limit your subagents to 4 parallel
+@all your end goal: faster, precise, accurate; no FPs, no FNs, better multi-language join accuracy;
+every test must measure these on unseen repos
+```
+
+The prompt hook records those lines as **directives** (so they're the user's own words, not an
+agent's). Every session gets new ones mid-turn and a one-line reminder with each prompt; new
+sessions and every subagent get them in full. They bind you until the user drops them: where
+one conflicts with your plan, change the plan and say so on the board. Pass them to every
+subagent you spawn. A subagent limit ("at most N agents") is enforced: further spawns are refused.
+
+`$B directives` lists them. If the user states one without `@all`, record it in their words:
+`$B directive add "<their words>"` (refused unless it's in their prompt). Only the user can drop
+one: `$B directive drop <id>`.
+
 ## 4c. The user's standing goal: coordinate, divide, keep going
 
 The user can set one goal for every session and agent in the project, in their own words:
