@@ -3075,6 +3075,8 @@ def main():
     an_.add_argument("ref")
     an_.add_argument("title")
     an_.add_argument("-b", "--body", default="")
+    an_.add_argument("--prompt-from", action="append", default=[], help="project folder where the user typed the answer")
+    an_.add_argument("--session", **sess)
     dg_ = sub.add_parser("digest", help="what every session did since a time")
     dg_.add_argument("--hours", type=float, default=8)
     pz_ = sub.add_parser("pause", help="the user pauses every session: finish the current step, write a brief, stop")
@@ -3464,8 +3466,9 @@ def main():
         print("Answer with: %s answer <id> \"...\"" % cli() if rows else "Nothing waits for you.")
         return 0
     if a.cmd == "answer":
-        if "CLAUDECODE" in os.environ:
-            sys.exit("Only the user answers from the needs list. Pass the question on to them instead.")
+        if "CLAUDECODE" in os.environ and not user_said(root, sid, a.title, a.prompt_from):
+            sys.exit("Only the user answers from the needs list. Pass the question on to them, or relay their answer "
+                     "in their own words (checked against their prompt; --prompt-from <project> if they typed it elsewhere).")
         m = find_msg(st, a.ref)
         if m:
             ev, st = emit(root, sid="user", kind="msg", to=[m["sid"]], re=m["re"] or m["id"], title=clip(a.title, 200),
