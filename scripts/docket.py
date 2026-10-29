@@ -82,6 +82,9 @@ CHARTER = """How to work under it (autonomous mode, set by the user):
   result before you claim it. Report measured numbers, not impressions.
 - Measure on inputs you didn't tune on (held-out or unseen data, repos, cases). A gain that only shows
   on what you tuned against doesn't count.
+- Never sit idle. Don't block on fixed sleeps or poll loops: run long jobs (builds, gates, scans) in
+  the background, keep working in your lane, and act when they finish. Post shared notices (a busy
+  machine, a broken baseline) before you wait, not after.
 - Finish the loop: test, commit and merge finished work through the project's normal flow, and log a
   fact with the evidence.
 - The goal doesn't authorise force-pushes, history rewrites, deleting data or production changes

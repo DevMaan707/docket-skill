@@ -115,6 +115,8 @@ goal, plus working rules:
 - **Decide:** don't wait for permission.
 - **Delegate:** spawn subagents inside your lane.
 - **Doubt:** critique plans and results, and measure on inputs you didn't tune on.
+- **Never sit idle:** run long jobs in the background instead of fixed sleeps, and post shared
+  notices before waiting.
 - **Report:** update each other with numbers.
 - **Audit:** check tasks regularly.
 - **Ship:** commit and merge.

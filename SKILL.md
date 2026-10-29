@@ -200,12 +200,15 @@ with each prompt. Subagents get the short form; pass on whatever they need. In a
    blocker, and log it (`$B log blocker`).
 4. **Doubt your work.** A fresh-context agent critiques each plan before you build and each result
    before you claim it. Measure on inputs you didn't tune on.
-5. **Update each other** on the goal thread at every milestone, with numbers.
-6. **Audit tasks** at the start and after each milestone: `$B audit` lists tasks nobody owns,
+5. **Never sit idle.** No fixed `sleep N` or blocking poll loops: run long builds, gates and scans
+   in the background (`run_in_background`), keep working, act when they finish. Post shared
+   notices (a busy machine, a broken baseline) before you wait, not after.
+6. **Update each other** on the goal thread at every milestone, with numbers.
+7. **Audit tasks** at the start and after each milestone: `$B audit` lists tasks nobody owns,
    stale ones, ones marked done without evidence, and items to close. Check each against the
    code: `resolve <id> --reason "<evidence>"`, `reopen <id> --reason "<what's missing>"`, adopt it,
    or tell the lane owner.
-7. **Finish the loop:** test, commit, merge, log a fact. When the goal is met:
+8. **Finish the loop:** test, commit, merge, log a fact. When the goal is met:
    `$B goal met -b "<evidence>"`; that tells every session and asks the user to confirm.
 
 While the goal is open, the Stop hook keeps a session that holds a lane (or has joined the goal
