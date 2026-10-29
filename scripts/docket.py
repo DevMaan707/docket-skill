@@ -1612,8 +1612,8 @@ def handle_hook(inp):
             late = deliver(root, sid, st)  # arrived while this turn was finishing
             if not late and others_live(st, sid) and not listening(root, sid):
                 late = ("Other sessions are live here and may message you while you're idle. Before you stop, "
-                        "run `%s listen --session %s` with Bash run_in_background: true (no other output "
-                        "needed). It exits when mail arrives, which wakes you; then answer it." % (cli(), sid))
+                        "run `%s listen --session %s` using Bash's run_in_background: true parameter (not & or "
+                        "nohup: those can't wake you). It exits when mail arrives, which wakes you; then answer it." % (cli(), sid))
             if late:
                 print(json.dumps({"decision": "block", "reason": late}))
                 return
@@ -2087,8 +2087,18 @@ def others_live(st, sid):
 
 
 def listen(root, sid, hours):
-    """Block until mail, a directive or a goal reaches this session, print it, exit. Run it with
-    run_in_background: Claude Code wakes an idle session when its background job exits."""
+    """Block until mail, a directive or a goal reaches this session, say so, exit. Run it with Bash
+    run_in_background: Claude Code wakes an idle session when its background job exits. It marks
+    nothing read: the hooks deliver the mail itself, so a listener nobody hears can't swallow it."""
+    try:
+        if os.path.samestat(os.fstat(1), os.stat(os.devnull)):
+            sys.exit("Refused: listen's output is thrown away, so it can't wake you. Run it with Bash "
+                     "run_in_background: true, not with & or > /dev/null.")
+    except OSError:
+        pass
+    if listening(root, sid):
+        print("A listener is already running for this session.")
+        return 0
     p = _listen_file(root, sid)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w") as f:
@@ -2106,11 +2116,18 @@ def listen(root, sid, hours):
                 s = st["sessions"].get(sid)
                 if s and (s["status"] == "ended" or process_gone(s)):
                     return 0
-                text = deliver(root, sid, st)
-                if text:
-                    print(text)
-                    print("\nWoken by docket mail. Handle it, then start `%s listen --session %s` in the "
-                          "background again before you stop." % (cli(), sid))
+                g, got = st.get("goal"), inbox(st, sid)
+                news = ["- [%s] %s from %s: %s" % (x["id"], MSG_KINDS.get(x.get("kind"), "FYI"), who_label(st, x),
+                                                     flag_suspicious(x["title"])) for x in got[-10:]]
+                if [d_ for d_ in directives(st) if d_["id"] not in (s or {}).get("dirSeen", [])]:
+                    news.append("- The user added a directive.")
+                if g and g["status"] == "active" and (s or {}).get("goalSeen") != g["id"]:
+                    news.append("- The user set a standing goal.")
+                if news:
+                    print("Docket mail woke you:\n" + "\n".join(news))
+                    print("\nThe full text arrives with your next tool call (or run `%s inbox --session %s`). "
+                          "Answer it, then start the listener again with Bash run_in_background: true."
+                          % (cli(), sid))
                     return 0
             time.sleep(5)
         print("Listener expired after %g h with no mail." % hours)

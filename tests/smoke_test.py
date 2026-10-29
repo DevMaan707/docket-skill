@@ -515,6 +515,12 @@ def main():
         except subprocess.TimeoutExpired:
             lp.kill(); lout = "(listener never exited)"
         check("the listener exits with the message, waking the session", "Gate is green" in lout, lout)
+        ctx = hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})
+        check("the listener leaves the mail unread for the hooks to deliver in full", "Gate is green" in ctx, ctx[-400:])
+        dn = subprocess.run([sys.executable, DOCKET, "listen", "--session", "sM1", "--hours", "0.001"], cwd=d, env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=30)
+        check("a listener whose output goes to /dev/null is refused", dn.returncode != 0 and "run_in_background" in dn.stderr,
+              dn.stderr)
         run(["msg", "Gate speed", "One more thing"], d, "sM2")
         out = stopL("sM1")
         check("mail that lands as a turn ends is handed over at Stop", '"block"' in out and "One more thing" in out, out)
