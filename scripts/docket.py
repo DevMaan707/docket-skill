@@ -59,6 +59,8 @@ except ValueError:
 AUTONOMY_WORDS = ("permission", "autonomous", "keep working", "keep going", "don't stop", "dont stop",
                   "without asking", "don't wait", "dnt wait", "dont wait", "until")
 STALE_HOURS = 24
+PROGRESS_KINDS = {"file", "plan", "decision", "fact", "note", "brief", "review", "summary", "msg", "spawn",
+                  "agent_start", "output", "claim", "lane", "pending_set", "work_new", "blocker", "tasks", "task"}
 
 
 def _envnum(k, d):
@@ -625,6 +627,8 @@ def apply(st, ev):
 
     if ev.get("pid"):
         s["pid"], s["host"] = ev["pid"], ev.get("host")
+    if kind in PROGRESS_KINDS:  # what counts as doing something, for the goal's keep-going
+        s["progressTs"] = ts
     if kind == "session_start":
         s["status"] = "idle"
         if ev.get("name") and not s["name"]:
@@ -657,7 +661,9 @@ def apply(st, ev):
     elif kind == "goal_seen":
         s["goalSeen"] = ev.get("ref")
     elif kind == "goal_continue":
-        s["continues"] = s.get("continues", 0) + 1
+        s["continues"], s["continueTs"] = s.get("continues", 0) + 1, ts
+    elif kind == "wait":  # a background job or a declared wait: stopping until it ends is not idling
+        s["waitUntil"], s["waitFor"] = ts + ev.get("secs", 1800), title
     elif kind == "turn_end":
         s["status"] = "idle"
     elif kind == "session_end":
@@ -1489,6 +1495,9 @@ def handle_hook(inp):
         if warn:
             hook_output(event, warn)
         if inp.get("tool_name") == "Bash":
+            ti = inp.get("tool_input") or {}
+            if ti.get("run_in_background") and who == "main":
+                emit(root, kind="wait", title=clip(ti.get("description") or ti.get("command"), 120), secs=1800, **E)
             return
     if event == "PreToolUse" and inp.get("tool_name") in EDIT_TOOLS:
         mode = os.environ.get("DOCKET_LEASES", "block")
@@ -1855,6 +1864,10 @@ def keep_going(st, sid):
         return None  # sessions on other work only get the goal in context, they aren't driven by it
     if any(a["status"] == "running" and now() - a["last"] < LIVE_SECS for a in s.get("agents", {}).values()):
         return None  # waiting on its own subagents is not idling
+    if s.get("waitUntil", 0) > now():
+        return None  # waiting on a background job; Claude Code wakes it when the job ends
+    if s.get("continues", 0) and s.get("progressTs", 0) <= s.get("continueTs", 0):
+        return None  # the last forced turn did nothing: there's nothing to do but wait, so let it stop
     if any(e["kind"] == "blocker" and not e.get("resolved") and e["ts"] >= s.get("promptTs", 0)
            for e in s.get("entries", [])):
         return None  # it logged a real blocker this turn
@@ -1864,17 +1877,16 @@ def keep_going(st, sid):
         return None  # ponytail: a fixed cap stops runaway loops; raise DOCKET_GOAL_MAX_CONTINUES for longer runs
     c = cli()
     if not lane:
-        return ("The user's standing goal is open and you have no lane yet: %s. Coordinate now: read the goal "
-                "thread (%s board) and the lanes (%s lanes), reply on the thread with what you'll own and any doubts, "
-                "agree with the others, then take your lane (%s lane take \"<area>\" -b \"<scope>\") and start. "
-                "(Continuation %d of %d.)" % (clip(" ".join(g["text"].split()), 200), c, c, c,
-                                               s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
-    return ("The user's standing goal is still open and in autonomous mode: %s. Don't stop to ask for "
-            "permission. Run audit and settle what it lists in your lane, post your progress on the goal thread, read the others' updates (%s board, %s inbox), "
-            "then pick the next step in your lane: the pending tasks on your work item, delegate independent pieces to subagents, verify on inputs you "
-            "didn't tune on, commit and merge what's finished. If you are truly blocked, log it (%s log blocker "
-            "\"...\") and stop. If the goal is met, run %s goal met -b \"<evidence>\". (Continuation %d of %d.)"
-            % (clip(" ".join(g["text"].split()), 200), c, c, c, c, s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
+        return ("The user's standing goal is open and you have no lane yet. Read the goal thread (%s board) and the "
+                "lanes (%s lanes), reply on the thread with what you'll own and your doubts, agree, then take your lane "
+                "(%s lane take \"<area>\" -b \"<scope>\") and start. (Continuation %d of %d.)"
+                % (c, c, c, s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
+    return ("The user's standing goal is still open (autonomous mode), so don't stop to ask. Take the next step in "
+            "your lane: settle what %s audit lists, read the goal thread and your inbox, delegate independent pieces, "
+            "verify on unseen inputs, commit and merge what's finished, and post progress on the thread. If you are only "
+            "waiting on a job, say so (%s wait \"<what>\" --minutes N) and stop. If truly blocked, log a blocker and "
+            "stop. If the goal is met: %s goal met -b \"<evidence>\". (Continuation %d of %d.)"
+            % (c, c, c, s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
 
 
 def memory(root="/"):
@@ -1965,12 +1977,13 @@ def mem_guard(root, sid, who, tool, ti):
                     "agents you don't need (%s mem shows the biggest processes), wait for running builds, then "
                     "retry. Reading files and kill/ps/docker stop/rm still work." % (why, cli())), None
         return None, None
-    if tool in ("Agent", "Task"):
+    if tool in ("Agent", "Task"):  # tight is a warning only: lag is acceptable, so useful work isn't refused
         st = load_state(root)
         n, cap = host_agents(st), max_agents(m)
         if n >= cap:
-            return ("Memory is tight on this machine (%s) and %d subagents are already running here (limit %d). "
-                    "Wait for one to finish, or do this step yourself." % (why, n, cap)), None
+            return None, ("<docket-warning>Memory is tight on this machine (%s) and %d subagents are running here "
+                          "(about %d fit). Prefer a light subagent, or wait for one to finish if this one runs builds "
+                          "or scans.</docket-warning>" % (why, n, cap))
     if HEAVY.search(cmd):
         return None, ("<docket-warning>Memory is tight on this machine (%s). Before this heavy job: make sure no "
                       "other heavy build or scan is running here, cap its parallelism and memory, and run it in "
@@ -2369,6 +2382,10 @@ def main():
     dr.add_argument("--prompt-from", action="append", default=[])
     dr.add_argument("--session", **sess)
     sub.add_parser("directives", help="the user's directives every session must follow")
+    wt_ = sub.add_parser("wait", help="say you're waiting on a job, so the standing goal lets you stop until it ends")
+    wt_.add_argument("what")
+    wt_.add_argument("--minutes", type=int, default=30)
+    wt_.add_argument("--session", **sess)
     sub.add_parser("mem", help="memory, disk and the biggest processes on this machine")
     sub.add_parser("audit", help="tasks to check: not done, stale, done without evidence, items to close")
     gl = sub.add_parser("goal", help="the user's standing goal for every session: show, set, met, clear")
@@ -2529,6 +2546,10 @@ def main():
                                        "".join("\n  attached %s (%s)" % (f["path"], attach_note(f)) for f in ev.get("files", []))))
         if ev.get("wids"):
             print("  tracked as pending task A-%s on %s" % (mid[:6], ", ".join(ev["wids"])))
+        return 0
+    if a.cmd == "wait":
+        emit(root, sid=sid, kind="wait", title=clip(a.what, 120), secs=max(1, a.minutes) * 60)
+        print("waiting on %s for up to %d min; stop now, you'll be woken when it ends" % (a.what, a.minutes))
         return 0
     if a.cmd == "directives":
         print(directives_block(st) or "No directives. The user adds one by starting a prompt line with @all.")

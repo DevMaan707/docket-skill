@@ -377,6 +377,17 @@ def main():
         check("taking a lane is announced to every session", "Taking lane: Precision" in ctx, ctx)
         out = stop("sM2")
         check("a session with a lane keeps going", '"decision": "block"' in out and "audit" in out, out)
+        run(["hook"], d, stdin=json.dumps(dict(hook_event_name="PreToolUse", session_id="sM2", cwd=d, tool_name="Bash",
+                                               tool_input={"command": "./gate.sh", "run_in_background": True})))
+        check("waiting on a background job lets it stop", "decision" not in stop("sM2"))
+        hook(d, "SessionStart", "sP"); hook(d, "UserPromptSubmit", "sP", prompt="docs please now")
+        run(["lane", "take", "Docs"], d, "sP")
+        out1 = stop("sP")
+        out2 = stop("sP")
+        run(["log", "note", "Wrote the guide"], d, "sP")
+        out3 = stop("sP")
+        check("a forced turn that does nothing lets the next stop through, real work re-arms it",
+              '"decision": "block"' in out1 and "decision" not in out2 and '"decision": "block"' in out3, out1 + out2 + out3)
         run(["log", "blocker", "Need the user's cloud credentials"], d, "sM2")
         check("a logged blocker lets it stop", "decision" not in stop("sM2"))
         code, out = run(["goal", "clear"], d, "sM2")
@@ -441,8 +452,8 @@ def main():
         warn = dict(DOCKET_DISK_CRIT_GB="0", DOCKET_DISK_WARN_GB="1e9")
         check("tight memory warns before a heavy job", "Memory is tight" in pre("Bash", {"command": "go test ./..."}, **warn))
         check("tight memory allows light commands silently", pre("Bash", {"command": "ls"}, **warn).strip() == "")
-        check("tight memory caps subagents per machine",
-              '"deny"' in pre("Agent", {"description": "x", "prompt": "y"}, DOCKET_MAX_AGENTS="0", **warn))
+        out = pre("Agent", {"description": "x", "prompt": "y"}, DOCKET_MAX_AGENTS="0", **warn)
+        check("tight memory warns about subagents but doesn't refuse them", "deny" not in out and "Memory is tight" in out, out)
         check("normal memory allows everything",
               pre("Bash", {"command": "make"}, DOCKET_DISK_CRIT_GB="0", DOCKET_DISK_WARN_GB="0").strip() == ""
               or "deny" not in pre("Bash", {"command": "make"}, DOCKET_DISK_CRIT_GB="0", DOCKET_DISK_WARN_GB="0"))

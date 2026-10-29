@@ -190,8 +190,8 @@ available RAM on Linux and Windows) and free disk, which matters because swap li
   and heavy commands are refused; reading files and `kill`, `ps`, `docker stop`, `rm` still work.
   Every session is told once (board and mail), and the standing goal stops forcing sessions on.
 - **Tight** (elevated pressure, under 20% RAM, or under 10 GB disk): heavy commands (builds, test
-  runs, docker, scans) get a warning, and a new subagent is refused when the machine already
-  runs about one per 2 GB of RAM.
+  runs, docker, scans) and subagent spawns beyond about one per 2 GB of RAM get a warning, never a
+  refusal: lag is acceptable.
 
 Your part: check `$B mem` before a heavy job; run at most one heavy build, test run or scan per
 machine at a time; cap its parallelism and memory (`-j2`, `GOMAXPROCS`, `-Xmx`,
@@ -253,7 +253,8 @@ with each prompt. Subagents get the short form; pass on whatever they need. In a
 
 While the goal is open, the Stop hook keeps a session that holds a lane (or has joined the goal
 thread) working, up to `DOCKET_GOAL_MAX_CONTINUES` (10) turns in a row without a user prompt. It
-lets it stop when it logged a blocker that turn or is waiting on its own subagents. Sessions on
+lets it stop when it logged a blocker that turn, is waiting on its own subagents or a background
+job (`run_in_background`, or `$B wait "<what>" --minutes N`), or its last forced turn did nothing. Sessions on
 other work just see the goal. `DOCKET_GOAL_STOP=off` turns the keep-going off.
 
 ## 4d. The record is in git

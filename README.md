@@ -111,8 +111,8 @@ The journal's **Board** page shows pinned notices, threads and messages with rea
 Many sessions, subagents and builds on one machine can exhaust memory and, once swap fills the
 disk, force a restart. Before every shell command and agent spawn docket checks memory pressure
 and free disk. When it's critical, new agents and heavy commands are refused (freeing memory
-still works) and every session is told. When it's tight, heavy jobs get a warning and new
-subagents are capped at about one per 2 GB of RAM. `docket.py mem` shows the biggest processes.
+still works) and every session is told. When it's tight, heavy jobs and extra subagents only get a
+warning, since lag is acceptable. `docket.py mem` shows the biggest processes.
 
 ## Directives from the user
 
