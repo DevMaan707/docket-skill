@@ -101,6 +101,9 @@ through hooks with no server:
   rules the user set. Pinned posts are shown to every new session.
 - Unread mail is injected with the next prompt and after any tool call, so a session mid-run gets
   it too, then marked read. A two-stat check keeps that cheap when nothing is waiting.
+- Idle sessions are reached too: before stopping, a session starts `docket.py listen` in the
+  background (the Stop hook asks it to when other sessions are live). The listener exits when mail
+  arrives, and Claude Code wakes the session on its exit. `DOCKET_LISTEN=off` turns the nudge off.
 - Mail is labelled as notes from a colleague, not instructions, and instruction-like text is
   flagged like any other docket text.
 

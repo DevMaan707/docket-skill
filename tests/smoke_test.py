@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCKET = os.path.join(HERE, "..", "scripts", "docket.py")
@@ -25,6 +26,7 @@ def run(args, cwd, session=None, stdin=None, pid=None, agent=True, extra_env=Non
     env = dict(os.environ, **(extra_env or {}))
     env.pop("DOCKET_ROOT", None)
     env.pop("CLAUDECODE", None)
+    env.setdefault("DOCKET_LISTEN", "off")  # only the listener test turns the Stop-hook listener nudge on
     if agent:
         env["CLAUDECODE"] = "1"  # as if a Claude Code agent ran it
     env["CLAUDE_PID"] = str(pid or os.getpid())  # sessions "run" in this live test process
@@ -459,6 +461,33 @@ def main():
               or "deny" not in pre("Bash", {"command": "make"}, DOCKET_DISK_CRIT_GB="0", DOCKET_DISK_WARN_GB="0"))
         code, out = run(["mem"], d)
         check("mem shows headroom and the biggest processes", code == 0 and "Biggest processes" in out, out)
+
+        # idle sessions: a background listener wakes them when mail arrives
+        on = dict(DOCKET_LISTEN="on")
+        stopL = lambda sid, **kw: run(["hook"], d, stdin=json.dumps(dict(hook_event_name="Stop", session_id=sid,
+                                                                          cwd=d, **kw)), extra_env=on)[1]
+        hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})
+        out = stopL("sM1")
+        check("an idle session is asked to start the listener", '"block"' in out and "listen --session sM1" in out, out)
+        check("...but only once per stop", "decision" not in stopL("sM1", stop_hook_active=True))
+        env = dict(os.environ, DOCKET_LISTEN="on", CLAUDECODE="1", CLAUDE_PID=str(os.getpid()))
+        env.pop("DOCKET_ROOT", None)
+        lp = subprocess.Popen([sys.executable, DOCKET, "listen", "--session", "sM1"], cwd=d, env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for _ in range(50):
+            if os.path.exists(os.path.join(d, ".docket", "listen", "sM1")):
+                break
+            time.sleep(0.1)
+        check("a running listener lets the session stop", "decision" not in stopL("sM1"))
+        run(["msg", "Gate speed", "Gate is green, your turn"], d, "sM2")
+        try:
+            lout = lp.communicate(timeout=20)[0]
+        except subprocess.TimeoutExpired:
+            lp.kill(); lout = "(listener never exited)"
+        check("the listener exits with the message, waking the session", "Gate is green" in lout, lout)
+        run(["msg", "Gate speed", "One more thing"], d, "sM2")
+        out = stopL("sM1")
+        check("mail that lands as a turn ends is handed over at Stop", '"block"' in out and "One more thing" in out, out)
 
         before = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
         run(["rebuild"], d)

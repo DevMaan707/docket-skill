@@ -1600,6 +1600,16 @@ def handle_hook(inp):
             emit(root, kind="goal_continue", title="Kept going: standing goal is open", **E)
             print(json.dumps({"decision": "block", "reason": why}))
             return
+        if who == "main" and not inp.get("stop_hook_active") and os.environ.get("DOCKET_LISTEN") != "off":
+            st = load_state(root)
+            late = deliver(root, sid, st)  # arrived while this turn was finishing
+            if not late and others_live(st, sid) and not listening(root, sid):
+                late = ("Other sessions are live here and may message you while you're idle. Before you stop, "
+                        "run `%s listen --session %s` with Bash run_in_background: true (no other output "
+                        "needed). It exits when mail arrives, which wakes you; then answer it." % (cli(), sid))
+            if late:
+                print(json.dumps({"decision": "block", "reason": late}))
+                return
         emit(root, kind="turn_end", title="Waiting for user",
              body=clip(inp.get("last_assistant_message"), 600), **E)
         sync_later(root)
@@ -2042,6 +2052,70 @@ def deliver_mail(root, sid, st=None):
     return text
 
 
+def _listen_file(root, sid):
+    return os.path.join(bdir(root), "listen", re.sub(r"[^\w-]", "_", sid))
+
+
+def listening(root, sid):
+    """Is a `listen` process alive for this session?"""
+    try:
+        with open(_listen_file(root, sid)) as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        return False
+    if os.name == "nt":
+        return True  # os.kill would terminate it on Windows; trust the file (removed on exit)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass
+    return True
+
+
+def others_live(st, sid):
+    return any(x["id"] != sid and x["status"] != "ended" and not process_gone(x) for x in st["sessions"].values())
+
+
+def listen(root, sid, hours):
+    """Block until mail, a directive or a goal reaches this session, print it, exit. Run it with
+    run_in_background: Claude Code wakes an idle session when its background job exits."""
+    p = _listen_file(root, sid)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f:
+        f.write(str(os.getpid()))
+    stamp, seen, checked, end = os.path.join(bdir(root), "mail.stamp"), None, 0, now() + hours * 3600
+    try:
+        while now() < end:
+            try:
+                m = os.path.getmtime(stamp)
+            except OSError:
+                m = 0
+            if m != seen or now() - checked > 60:  # ponytail: 5 s mtime poll, inotify/kqueue if latency matters
+                seen, checked = m, now()
+                st = load_state(root)
+                s = st["sessions"].get(sid)
+                if s and (s["status"] == "ended" or process_gone(s)):
+                    return 0
+                text = deliver(root, sid, st)
+                if text:
+                    print(text)
+                    print("\nWoken by docket mail. Handle it, then start `%s listen --session %s` in the "
+                          "background again before you stop." % (cli(), sid))
+                    return 0
+            time.sleep(5)
+        print("Listener expired after %g h with no mail." % hours)
+        return 0
+    finally:
+        try:
+            with open(p) as f:
+                if f.read().strip() == str(os.getpid()):
+                    os.remove(p)
+        except OSError:
+            pass
+
+
 def pinned_block(st):
     pins = [m for m in st.get("msgs", []) if m["pin"] and "board" in m["to"]]
     if not pins:
@@ -2396,6 +2470,9 @@ def main():
     wt_.add_argument("what")
     wt_.add_argument("--minutes", type=int, default=30)
     wt_.add_argument("--session", **sess)
+    ls_ = sub.add_parser("listen", help="wait for mail (run in the background): exits when a message arrives, waking you")
+    ls_.add_argument("--hours", type=float, default=12)
+    ls_.add_argument("--session", **sess)
     sub.add_parser("mem", help="memory, disk and the biggest processes on this machine")
     sub.add_parser("audit", help="tasks to check: not done, stale, done without evidence, items to close")
     gl = sub.add_parser("goal", help="the user's standing goal for every session: show, set, met, clear")
@@ -2557,6 +2634,8 @@ def main():
         if ev.get("wids"):
             print("  tracked as pending task A-%s on %s" % (mid[:6], ", ".join(ev["wids"])))
         return 0
+    if a.cmd == "listen":
+        return listen(root, sid, max(0.01, a.hours))
     if a.cmd == "wait":
         emit(root, sid=sid, kind="wait", title=clip(a.what, 120), secs=max(1, a.minutes) * 60)
         print("waiting on %s for up to %d min; stop now, you'll be woken when it ends" % (a.what, a.minutes))
