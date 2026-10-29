@@ -1720,7 +1720,7 @@ def handle_hook(inp):
             if late:
                 print(json.dumps({"decision": "block", "reason": late}))
                 return
-        emit(root, kind="turn_end", title="Waiting for user",
+        emit(root, kind="turn_end", title="Waiting for user", sock=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""),
              body=clip(inp.get("last_assistant_message"), 600), **E)
         sync_later(root)
 
