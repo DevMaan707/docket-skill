@@ -1671,6 +1671,7 @@ def inbox(st, sid):
     """Unread mail for a session: to it, to its work item, to all; board posts since it started."""
     s = st["sessions"].get(sid, {})
     mine = {sid, "all", "board", s.get("work")} - {None}
+    mine |= {w for w, x in st["work"].items() if any(y["sid"] == sid for y in x.get("sessions", []))}  # moved on, still its owner
     return [m for m in st.get("msgs", []) if m["sid"] != sid and sid not in m["readBy"]
             and mine & set(m["to"]) and not (set(m["to"]) <= {"board", "all"} and m["ts"] < s.get("started", 0))]
 
@@ -2634,6 +2635,9 @@ def main():
                       body=clip(body, 6000), re=re_, pin=pin, **extra)
         print("sent %s %s to %s%s%s" % (ev["msgKind"], ev["id"], to_label(st, ev["to"]), " (pinned)" if pin else "",
                                        "".join("\n  attached %s (%s)" % (f["path"], attach_note(f)) for f in ev.get("files", []))))
+        for t in ev["to"]:
+            if t.startswith("W-") and not live_sessions(st, t, exclude=sid):
+                print("  nobody live has worked on %s; it waits for whoever picks it up" % t)
         if ev.get("wids"):
             print("  tracked as pending task A-%s on %s" % (mid[:6], ", ".join(ev["wids"])))
         return 0

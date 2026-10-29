@@ -462,6 +462,11 @@ def main():
         code, out = run(["mem"], d)
         check("mem shows headroom and the biggest processes", code == 0 and "Biggest processes" in out, out)
 
+        hook(d, "UserPromptSubmit", "sW9", prompt="speed up the build gate please")
+        run(["work", "attach", "W-0001"], d, "sW9"); run(["work", "new", "Pricing model", "-k", "pricing"], d, "sW9")
+        run(["msg", "W-0001", "Please run your SAST runner on my branch"], d, "sM2")
+        ctx = hook(d, "PostToolUse", "sW9", tool_name="Bash", tool_input={"command": "ls"})
+        check("mail to a work item reaches a session that moved on to another item", "SAST runner" in ctx, ctx[-400:])
         long_ = "I own P4 and object to step 3 " + "x" * 300 + " END-OF-LONG-TITLE"
         run(["msg", "Gate speed", long_], d, "sM2")
         ctx = hook(d, "PostToolUse", "sM1", tool_name="Bash", tool_input={"command": "ls"})
