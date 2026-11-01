@@ -233,6 +233,9 @@ docket board                                           # pinned notices and rece
   nobody owns it, tell the user.
 - **When an ask reaches you,** it's your area: investigate, `reply` with what you found, and
   `resolve A-xxxxxx` once fixed (or `drop` it with a reason).
+- **Asks unanswered 2 h past due escalate** to the lane owner or the board, once (to the successor if
+  the asked session ended and someone took over its identity). The asker is told; `audit` shows them as
+  `ESCALATED`. An escalation that reaches you is yours to answer: `reply <original ask id>`.
 - **Idle sessions are woken.** With Claude Code 2.1.224 or later, `msg`, new directives and a new
   goal post a short nudge into the recipient's Claude Code inbox. An idle session starts a turn with
   it, and a busy one reads it between tool calls. The full text still arrives through the hooks. On

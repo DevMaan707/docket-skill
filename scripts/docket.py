@@ -583,7 +583,7 @@ def audit(st):
         elif not live_sessions(st, w["id"]) and now() - w["updated"] > 3 * 86400:
             out.append((w["id"], "-", "STALE ITEM", "no activity for %d days and nobody live on it"
                         % ((now() - w["updated"]) // 86400)))
-    return out
+    return audit_escalated(st, out)
 
 
 def find_pending(st, pid):
@@ -943,6 +943,9 @@ def apply(st, ev):
             body=body, re=ev.get("re"), pin=bool(ev.get("pin")), wid=s.get("work"), readBy=[],
             kind=ev.get("msgKind") or "fyi", files=ev.get("files") or [], wids=ev.get("wids") or [], due=ev.get("due")))
         st["msgs"] = st["msgs"][-MAX_MSGS:]
+        for o in st["msgs"] if ev.get("escalates") else []:  # escalate_asks: the original ask escalates once
+            if o["id"] == ev["escalates"]:
+                o["escalated"] = {"ts": ts, "to": ev.get("to"), "by": ev["id"]}
         if sid == "steward":  # tidy duty rotates: whoever had it last goes to the back
             for t in ev.get("to") or []:
                 if t in st["sessions"]:
@@ -2112,6 +2115,7 @@ def handle_hook(inp):
                  % who, body="Docket saw no file edits and no test run by it. Its claim: " + clip(msg, 300), **E)
 
     elif event == "Stop":
+        escalate_due(root)  # unanswered asks past due, at most every 10 min
         if who == "main":
             try:
                 tok = read_tokens(root, sid, inp.get("transcript_path"))
@@ -3332,7 +3336,7 @@ def open_asks(st, sid=None):
     for m in msgs:
         if m.get("kind") != "ask":
             continue
-        answered = {r["sid"] for r in msgs if r["re"] == m["id"] and r["sid"] != m["sid"]}
+        answered = {r["sid"] for r in msgs if r["re"] == m["id"] and r["sid"] not in (m["sid"], "steward")}
         if answered:
             continue
         if any(i["status"] in ("done", "dropped") for w in m.get("wids", []) if w in st["work"]
@@ -3349,6 +3353,91 @@ def open_asks(st, sid=None):
 
 def ask_due(m):
     return m.get("due") or m["ts"] + 3600
+
+
+ESCALATE_SECS = _envnum("DOCKET_ASK_ESCALATE_HOURS", 2) * 3600
+
+
+def _reachable(x):
+    return x["status"] != "ended" and not process_gone(x)
+
+
+def escalation_target(st, m):
+    """Where an unanswered ask goes next: the successor of an asked session that ended or died, else the
+    live owner of a lane covering the ask's work item (not the asker, not the asked), else the board."""
+    S, asked = st["sessions"], [t for t in m["to"] if t in st["sessions"] and t != "user"]
+    for t in asked:
+        x, seen = S[t], {t}
+        if _reachable(x):
+            continue
+        while x.get("next") in S and x["next"] not in seen:
+            seen.add(x["next"])
+            x = S[x["next"]]
+        if x["id"] != t and _reachable(x):
+            return x["id"], "the successor of %s" % sname(st, t)
+    skip = selves(st, m["sid"]).union(*[selves(st, t) for t in asked])
+    on = {y["sid"] for w in m.get("wids", []) for y in st["work"].get(w, {}).get("sessions", [])}
+    for l in sorted(st.get("lanes", {}).values(), key=lambda l: l["ts"]):
+        text = "%s %s" % (l["name"], l["scope"] or "")
+        if (any(w in text for w in m.get("wids", [])) or selves(st, l["sid"]) & on) \
+                and l["sid"] not in skip and l["sid"] in S and _reachable(S[l["sid"]]):
+            return l["sid"], "the owner of lane %s, which covers it" % l["name"]
+    return "board", "a board post: nobody else owns it"
+
+
+def escalate_asks(root, st):
+    """Asks still unanswered ESCALATE_SECS past due go once to escalation_target, as a steward message in
+    the ask's thread (re=), and the asker is told. The `escalates` field on that message is the record."""
+    out = []
+    for m in open_asks(st):
+        if m.get("escalated") or m["sid"] == "steward" or now() - ask_due(m) < ESCALATE_SECS \
+                or not [t for t in m["to"] if t in st["sessions"] and t != "user" or t.startswith("W-")]:
+            continue
+        (to, why), hrs = escalation_target(st, m), int((now() - m["ts"]) // 3600)
+
+        def once(st_, lock, mid=m["id"]):
+            if any(o["id"] == mid and o.get("escalated") for o in st_.get("msgs", [])):
+                raise Conflict("already escalated")
+        try:
+            ev, st = emit(root, _guard=once, sid="steward", kind="msg", to=[to], msgKind="fyi", re=m["id"], escalates=m["id"],
+                          title="Escalated ask %s from %s, unanswered %d h: %s" % (m["id"], who_label(st, m), hrs, clip(m["title"], 140)),
+                          body="%s asked %s and got no reply. It reached you as %s. Answer it: %s reply %s \"...\" "
+                               "(or resolve/drop A-%s on %s).\n\n%s" % (
+                                   sname(st, m["sid"]), to_label(st, m["to"]), why, cli(), m["id"], m["id"][:6], ", ".join(m.get("wids") or []) or "no work item", m["body"]))
+        except Conflict:
+            continue
+        if to != "board":
+            wake(st, ev)
+        if m["sid"] in st["sessions"] and m["sid"] != "user":
+            emit(root, sid="steward", kind="msg", to=[m["sid"]], msgKind="fyi", re=m["id"],
+                 title="your ask %s got no reply in %d h; escalated to %s" % (m["id"], hrs, to_label(st, [to])))
+        out.append((m["id"], to))
+    return out
+
+
+ESCALATE_CHECK_SECS = 600
+
+
+def escalate_due(root):
+    """The hook path: at most every ESCALATE_CHECK_SECS (one stat when not due), never raises."""
+    f = os.path.join(bdir(root), "escalate")
+    try:
+        if now() - os.path.getmtime(f) < ESCALATE_CHECK_SECS:
+            return []
+    except OSError:
+        pass
+    try:
+        open(f, "w").close()
+        return escalate_asks(root, load_state(root))
+    except Exception:  # hooks must never break Claude Code
+        return []
+
+
+def audit_escalated(st, rows):
+    """audit: an open ask that was escalated and still has no reply shows as ESCALATED."""
+    esc = {"A-" + m["id"][:6]: m["escalated"] for m in open_asks(st) if m.get("escalated")}
+    return [(w, p, "ESCALATED", "%s; escalated to %s %s" % (t, to_label(st, esc[p]["to"]), ago(esc[p]["ts"])))
+            if p in esc and tag in ("NOT DONE", "REVIEW") else (w, p, tag, t) for w, p, tag, t in rows]
 
 
 def ready_work(st):
@@ -4356,6 +4445,8 @@ def main():
         if a.cmd == "reply":
             orig = find_msg(st, a.ref) or sys.exit("No message with id %s (or the prefix matches several)." % a.ref)
             re_ = orig["re"] or orig["id"]
+            if orig["sid"] == "steward":  # an escalation: the answer goes to whoever asked
+                orig = find_msg(st, re_) or orig
             g_ = st.get("goal") or {}
             to = ["board", "all"] if re_ == g_.get("thread") and g_.get("status") == "active" else (["board"] if "board" in orig["to"] else []) + (
                 [orig["sid"]] if orig["sid"] != sid else [t for t in orig["to"] if t != "board"])
@@ -4697,6 +4788,7 @@ def main():
                 return 0
             rouse_idle(root, st, sent)
             steward(root, st)
+            escalate_asks(root, load_state(root))
     if a.cmd == "assume":
         cands = [x for x, _ in free_identities(st, sid)]
         q = a.who.lower()
