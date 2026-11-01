@@ -79,8 +79,52 @@ RELIEF = re.compile(r"^\s*(?:sudo\s+)?(?:rtk\s+)?(?:kill|pkill|killall|ps|top|ht
 HEAVY = re.compile(r"\b(?:make|cmake|ninja|go\s+(?:build|test|run|vet)|cargo|rustc|mvn|gradlew?|javac|npm|pnpm|yarn|"
                    r"bun|tsc|webpack|vite|jest|vitest|pytest|docker|podman|bazel|clang|gcc|g\+\+|xcodebuild|swift\s+build|"
                    r"semgrep|codeql|dependency-check)\b")
+LEAD_CHARTER = """You are the lead: the product owner of this project. You own WHAT gets built and WHY; the sessions
+in lanes own HOW. The user owns the aim itself: who it's for, what success means, the binding
+constraints, and anything destructive, costly or irreversible.
+1. Understand before you plan. Read the code and the record (search, decisions, board, aim) first;
+   never ask the user what those already answer. Restate the aim in one sentence, with how sure you
+   are and what's missing.
+2. Interview the user, one question per message, each with your best guess and why the answer
+   matters. Ask only what would change what gets built, most important first: scope, then users and
+   success, then constraints, then details. Cover: the outcome in their words and the problem it
+   solves; who it's for and what they'll do with it; why now; how success is measured; what's out of
+   scope; the binding constraint; which choices are theirs and which are yours. Stop when you could
+   predict their next three answers, or after about five questions.
+3. Write the aim: aim set -b "Outcome / Users / Why now / Success (measurable) / Constraints /
+   Out of scope / Assumptions / Open questions". Show it and get an explicit yes ("sounds good" or
+   "whatever you think" isn't one), then record it: aim confirm "<their words>". If the user is away
+   or told you to proceed, work from the draft: each gap is an open question to them (msg user ...
+   --default "<what you'll do>"), each guess a logged Assumption.
+4. Plan from the aim: work items with acceptance checks (work new ... --done-when), split by
+   deliverable and file ownership, riskiest first. Size the team to the work: one session for a
+   small change, three to five for product work; three focused sessions beat five scattered ones.
+5. Brief every lane. A session sees only what you tell it, so each brief carries: the objective and
+   the part of the aim it serves; inputs and decisions already locked; boundaries (files, what's
+   out); what to hand back; done-when. Vague briefs cause duplicate work and gaps.
+6. Steer, don't relay. Read briefs (who), queues and digests; don't ask for status pings and don't
+   paste records around: point to ids. Don't take lane work yourself; unblock, decide, re-plan.
+7. Accept against the aim. "The lane says done" isn't done: run the acceptance checks, or have a
+   reviewer from another lane run them. When reality changes the plan, log the decision and re-brief
+   the lanes it touches.
+8. Decide inside the aim; take only the user's calls to the user (changes to the aim, audience,
+   success measure or constraints; anything destructive, costly or irreversible), batched in one
+   message, most important first, each with your recommendation."""
+
+MEMBER_CHARTER = """%s leads this project as product owner. You build, review or investigate in your lane, under
+the aim below and the lead's brief for your lane.
+- Read the aim, your lane's brief and the decisions already made before you start.
+- Stay in your lane. Another lane's files or problems go to its owner (finding or ask); ideas
+  outside your lane go to the lead as a note, not into code.
+- Make implementation calls yourself and log them (decision --rejected). Ask the lead, not the
+  user, when the brief is ambiguous in a way that changes the outcome: early, one concrete question.
+- Report through your brief (now / done / next / blocked); the lead reads briefs, not status mail.
+- Done means the acceptance checks pass with evidence you ran this turn; then hand it to review.
+  Don't stop early, don't gold-plate."""
+
 CHARTER = """How to work under it (autonomous mode, set by the user):
-- Coordinate first, then divide. Read the goal thread (board) and the lanes (lanes). Reply on the
+- If a session holds the "lead" lane, it owns the plan: take your lane from its briefs and ask it,
+  not the user, about scope. Otherwise coordinate first, then divide. Read the goal thread (board) and the lanes (lanes). Reply on the
   thread with what you propose to own and why, and any doubts about the goal or the others'
   proposals. Settle disagreements on the thread, then take your lane (lane take "<area>" -b "<scope>").
   Don't work outside your lane: send findings and asks to the lane's owner instead. One lane each;
@@ -790,6 +834,8 @@ def apply(st, ev):
         s["name"] = title
     elif kind == "prompt":
         s["prompt"], s["status"], s["promptTs"], s["continues"] = body, "working", ts, 0
+        if not body.startswith("[docket]"):  # the user typed it (docket's own wake-ups start with [docket])
+            s["userPrompts"] = (s.get("userPrompts") or [])[-49:] + [ts]
     elif kind == "goal_set":
         st["goal"] = {"id": ev["id"], "text": body, "ts": ts, "sid": sid, "status": "active",
                       "autonomous": bool(ev.get("autonomous")), "note": "", "thread": ev.get("thread"),
@@ -801,6 +847,10 @@ def apply(st, ev):
             st.get("lanes", {}).pop(key, None)
         else:
             st.setdefault("lanes", {})[key] = {"name": title, "scope": body, "sid": sid, "ts": ts}
+    elif kind == "aim":  # the product aim the lead wrote; a new version is a draft until the user confirms it
+        st["aim"] = {"id": ev["id"], "text": body, "ts": ts, "sid": sid, "status": "draft"}
+    elif kind == "aim_confirm" and st.get("aim"):
+        st["aim"].update(status="confirmed", confirmTs=ts, quote=body)
     elif kind in ("goal_met", "goal_clear"):
         if st.get("goal"):
             st["goal"].update(status="met" if kind == "goal_met" else "cleared", note=body, endTs=ts, endBy=sid)
@@ -1920,7 +1970,8 @@ def handle_hook(inp):
             emit(root, kind="constitution_seen", hash=constitution(root)[1], title="Read the constitution", **E)
         start_rouser(root, st)
         head = "\n".join(x for x in (context_for(root, sid, "main"), resumed, ident,
-                                     brief_reminder(st, sid) if inp.get("source") == "compact" else None, cv) if x)
+                                     brief_reminder(st, sid) if inp.get("source") == "compact" else None, cv,
+                                     role_changed(root, st, sid) or role_block(st, sid)) if x)
         rest = "\n".join(x for x in (team_block(st, sid), queues_line(st), dv, g, pinned_block(st), digest) if x)
         if len(head) + len(rest) > CTX_CAP:  # a long board must not crowd out the session's own context
             rest = rest[:max(0, CTX_CAP - len(head))].rsplit("\n", 1)[0] + "\n(more: %s who / board / digest)" % cli()
@@ -1974,6 +2025,7 @@ def handle_hook(inp):
                 ctx.append("<docket-digest>The user is back after %s. Other sessions since then:\n%s\nStart your reply with a "
                            "3-line recap of this for the user.</docket-digest>" % (ago(last_prompt).replace(" ago", ""),
                                                                                    "\n".join(dg[:12])))
+        ctx.append(role_changed(root, st, sid))
         if st.get("paused"):
             ctx.append("<docket>The user paused all sessions %s. Do only what this prompt asks; start no agents or long "
                        "jobs until they run resume.</docket>" % ago(st["paused"]["ts"]))
@@ -2166,7 +2218,7 @@ def handle_hook(inp):
 
 
 # claims of having changed code, not "done" (a research agent is done when it reports)
-CLAIMS_DONE = re.compile(r"\b(?:fixed|implemented|(?:I|we) (?:added|changed|updated|wrote|refactored|patched)|"
+CLAIMS_DONE = re.compile(r"\b(?:fixed|implemented|(?:I|we) (?:added|changed|updated|wrote|refactored|patched)(?!\s+(?:no|nothing|none)\b)|"
                          r"all tests pass(?:ed|ing)?|tests (?:now )?pass(?:ed)?)\b", re.I)
 TEST_CMD = re.compile(r"\b(?:pytest|unittest|jest|vitest|mocha|rspec|(?:go|cargo|npm|pnpm|yarn|bun|mvn|gradlew?|swift|dotnet) test|"
                       r"make (?:test|check)|tox|nox|ctest)\b|\btests?/\S+\.py\b|_test\.py\b")
@@ -2314,6 +2366,62 @@ def attach(root, mid, paths):
             f.write(data)
         out.append({"name": os.path.basename(p), "path": rp, "bytes": size, "kept": len(data)})
     return out
+
+
+LEAD_MIN_PROMPTS = 3
+
+
+def lead_of(st):
+    """The lead is the session the user talks to most: the live one with the most prompts the user typed
+    in the last day (at least LEAD_MIN_PROMPTS). A session that took the lead explicitly (docket lead,
+    when the user says so) holds it while it's live."""
+    l = st.get("lanes", {}).get("lead")
+    if l and is_live(st["sessions"].get(l["sid"])):
+        return l["sid"]
+    t, best = now(), None
+    for x in st["sessions"].values():
+        if x["id"] in ("user", "manual", "steward") or not is_live(x):
+            continue
+        n = sum(1 for p in x.get("userPrompts") or [] if t - p < 86400)
+        key = (n, x.get("promptTs", 0))
+        if n >= LEAD_MIN_PROMPTS and (best is None or key > best[0]):
+            best = (key, x["id"])
+    return best and best[1]
+
+
+def role_block(st, sid):
+    """The lead gets the product-owner charter; everyone else, when a lead exists, the member charter.
+    Both see the aim (draft or confirmed)."""
+    lead, a = lead_of(st), st.get("aim")
+    aim = ("Product aim (%s, by %s %s):\n%s" % (
+        "confirmed by the user" if a["status"] == "confirmed" else "DRAFT, not yet confirmed by the user",
+        sname(st, a["sid"]), ago(a["ts"]), clip(a["text"].strip(), 1500)) if a else None)
+    if lead and lead in selves(st, sid):
+        body = [LEAD_CHARTER, "", aim or "No aim recorded yet: start at step 1."]
+    elif lead:
+        body = [MEMBER_CHARTER % sname(st, lead), "", aim or "The lead hasn't recorded the aim yet; ask it for your brief."]
+    elif aim:
+        body = [aim]
+    else:
+        return None
+    return "<docket-role>\n%s\n</docket-role>" % "\n".join(body)
+
+
+def role_changed(root, st, sid):
+    """The role block again when this session's role (lead, member, none) or the aim changed since it last
+    saw it: the lead moves to whichever session the user talks to most, mid-session too."""
+    lead, a = lead_of(st), st.get("aim") or {}
+    key = "%s|%s|%s" % ("lead" if lead and lead in selves(st, sid) else lead or "-", a.get("id"), a.get("status"))
+    f = os.path.join(bdir(root), "role", re.sub(r"[^\w-]", "_", sid))
+    try:
+        if open(f).read() == key:
+            return None
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    with open(f, "w") as fh:
+        fh.write(key)
+    return role_block(st, sid)
 
 
 def goal_block(st, full=True):
@@ -4264,6 +4372,14 @@ def main():
     wd.add_argument("--session", **sess)
     sub.add_parser("tidy", help="what nobody owns and has gone stale: old pins, settled needs, idle items, lagging briefs")
     sub.add_parser("who", help="live sessions you can message")
+    ld = sub.add_parser("lead", help="become the lead: product owner who interviews the user, writes the aim, plans and briefs lanes")
+    ld.add_argument("--session", **sess)
+    am = sub.add_parser("aim", help="the product aim: show, set (the lead's draft), confirm (the user's yes)")
+    am.add_argument("action", nargs="?", choices=["show", "set", "confirm"], default="show")
+    am.add_argument("text", nargs="?", default="")
+    am.add_argument("-b", "--body", default="")
+    am.add_argument("--prompt-from", action="append", default=[], help="confirm: project the user typed it in")
+    am.add_argument("--session", **sess)
     ln = sub.add_parser("lane", help="take or drop your part of the goal")
     ln.add_argument("action", choices=["take", "drop"])
     ln.add_argument("name")
@@ -4683,8 +4799,38 @@ def main():
     if a.cmd == "lanes":
         print(lanes_text(st))
         return 0
+    if a.cmd == "lead":
+        held = lead_of(st)
+        if held and held not in selves(st, sid):
+            sys.exit("%s is the lead: the user talks to it most. Message it instead (msg %s \"...\")." % (sname(st, held), held[:8]))
+        if not held:
+            emit(root, sid=sid, kind="lane", title="lead", body="Product owner: aim, plan, lane briefs, acceptance")
+            st = load_state(root)
+        print(role_block(st, sid))
+        return 0
+    if a.cmd == "aim":
+        text = (a.text or a.body).strip()
+        if a.action == "show":
+            x = st.get("aim")
+            print("No aim recorded." if not x else "%s (%s, %s)\n\n%s" % (
+                x["status"].upper(), sname(st, x["sid"]), ago(x["ts"]), x["text"]))
+            return 0
+        if a.action == "set":
+            text or sys.exit("aim set needs the aim: -b \"Outcome / Users / Why now / Success / Constraints / Out of scope / Assumptions / Open questions\"")
+            emit(root, sid=sid, kind="aim", title="Product aim (draft)", body=clip(text, 6000))
+            print("aim recorded as a DRAFT; show it to the user and record their yes with: %s aim confirm \"<their words>\"" % cli())
+            return 0
+        st.get("aim") or sys.exit("No aim to confirm: aim set first.")
+        if not text or not user_said(root, sid, text, a.prompt_from):
+            sys.exit("Refused: only the user confirms the aim. Pass their own words from their prompt (aim confirm \"<their words>\").")
+        emit(root, sid=sid, kind="aim_confirm", title="The user confirmed the product aim", body=clip(text, 1000))
+        print("aim confirmed")
+        return 0
     if a.cmd == "lane":
         key = _norm(a.name) or a.name.lower()
+        if key == "lead" and a.action == "take" and lead_of(st) and lead_of(st) not in selves(st, sid):
+            sys.exit("%s is the lead: the user talks to it most. Message it instead (msg %s \"...\")."
+                     % (sname(st, lead_of(st)), lead_of(st)[:8]))
         held = st.get("lanes", {}).get(key)
         if a.action == "take" and held and held["sid"] != sid and is_live(st["sessions"].get(held["sid"])):
             sys.exit("Lane %r is %s's. Agree a split on the goal thread or message them (msg %s \"...\") "

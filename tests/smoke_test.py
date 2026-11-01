@@ -371,7 +371,7 @@ def main():
         check("a goal in the user's own words is set", code == 0 and "autonomous" in out, out)
         ctx = hook(d, "PostToolUse", "sM2", tool_name="Bash", tool_input={"command": "ls"})
         check("a live session gets the goal, the charter and the thread mid-turn",
-              "parsers are precise" in ctx and "Coordinate first" in ctx and "Goal thread" in ctx, ctx)
+              "parsers are precise" in ctx and "oordinate first" in ctx and "Goal thread" in ctx, ctx)
         ctx = hook(d, "UserPromptSubmit", "sM2", prompt="carry on please now")
         check("later prompts get a one-line reminder", "<docket-goal>Standing goal" in ctx and "Coordinate" not in ctx, ctx)
         stop = lambda sid: run(["hook"], d, stdin=json.dumps(dict(hook_event_name="Stop", session_id=sid, cwd=d)))[1]

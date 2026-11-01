@@ -351,6 +351,25 @@ subagent you spawn. A subagent limit ("at most N agents") is enforced: further s
 `docket directive add "<their words>"` (refused unless it's in their prompt). Only the user can drop
 one: `docket directive drop <id>`.
 
+## 4b4. The lead is the product owner
+
+The lead is the session the user talks to most: the live one with the most prompts they typed in
+the last day (docket's own `[docket]` wake-ups don't count). When there's no lead yet (a fresh
+project, the user just described an idea), `docket lead` claims it. Nobody can take it from the
+session the user is talking to. Docket shows each session its role in a `<docket-role>` block at
+start and whenever the role or the aim changes.
+
+- **The lead** gets the product-owner charter. It reads the code and record first, interviews the
+  user one question at a time (each with its own guess), and stops when it could predict the next
+  three answers. It writes the aim (`docket aim set -b "Outcome / Users / Why now / Success /
+  Constraints / Out of scope / Assumptions / Open questions"`) and gets an explicit yes, recorded
+  with `docket aim confirm "<their words>"` (only the user's own prompt text counts). Then it plans
+  work items with acceptance checks, briefs every lane (objective, locked decisions, boundaries,
+  output, done-when), accepts against the aim, and takes only the user's calls back to them.
+- **Everyone else** works in a lane under the aim: reads the aim and their brief first, stays in
+  their lane, asks the lead (not the user) about scope, reports through their brief, and hands
+  finished work to review with evidence.
+
 ## 4c. The user's standing goal: coordinate, divide, keep going
 
 The user can set one goal for every session and agent in the project, in their own words:
