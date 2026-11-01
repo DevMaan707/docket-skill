@@ -51,7 +51,8 @@ with the session id and agent name filled in.
 ## The work index
 
 ```bash
-docket.py search "token expiry"              # find earlier work
+docket.py search "token expiry"              # find earlier work, then single entries that match
+docket.py show 3fa9c1                        # one entry in full; --around 3 for its timeline
 docket.py show W-0003                        # read a work page, with trust re-checked live
 docket.py check W-0003                       # re-hash cited files; lists STALE facts
 docket.py work attach W-0003                 # continue it from this session
@@ -64,7 +65,9 @@ docket.py work list                          # the whole index, by area and by t
 ```
 
 Each work item gets a Markdown page in `.docket/work/`, plus a line in `.docket/work/INDEX.md`.
-Agents can read these directly.
+Agents can read these directly. When a session reads a file the record knows (a decision, fact,
+dead end or blocker citing it, or another session's edits), up to 3 pointer lines are injected,
+once per session per file.
 
 ## Agents never collide
 
@@ -133,6 +136,12 @@ The journal's **Board** page shows pinned notices, threads and messages with rea
   reply back to the session that asked and wakes it.
 - **Back after a while:** your first prompt after 2+ hours starts with a recap of what every session
   did. `docket.py digest --hours 8` prints the same.
+- **Retro:** `docket.py retro --days 7` counts, per session and overall, items closed and parked,
+  review verdicts, wrong claims, dead ends, blockers and time to unblock, keep-going turns, late
+  asks, metric changes and tokens, and ends with 3 recommendations. It's saved on a "Retros" item;
+  the next retro lists them again to mark addressed, partial or open.
+- **Token cost:** each Stop adds the turn's tokens from the transcript as a `tokens` metric; `who`
+  and the digest show each session's total.
 - **Pause and resume:** `docket.py pause --why "lunch"` tells every session to finish its step, write
   its brief and stop; no new agents start. `docket.py resume` starts them again. Only you can do
   either.

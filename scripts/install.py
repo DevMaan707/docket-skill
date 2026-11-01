@@ -21,7 +21,7 @@ EVENTS = [
     ("SessionStart", None),
     ("PreCompact", None),  # repeat the brief so compaction keeps it
     ("UserPromptSubmit", None),
-    ("PreToolUse", "Agent|Task|Bash|Edit|Write|MultiEdit|NotebookEdit"),  # leases; memory guard
+    ("PreToolUse", "Agent|Task|Bash|Read|Edit|Write|MultiEdit|NotebookEdit"),  # leases; memory guard; file recall on Read
     ("PostToolUse", None),  # every tool: task lists, plans and edits, plus mail delivered mid-turn
     ("SubagentStart", None),
     ("SubagentStop", None),
