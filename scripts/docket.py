@@ -73,7 +73,7 @@ def _envnum(k, d):
 
 MEM_WARN, MEM_CRIT = _envnum("DOCKET_MEM_WARN", 20), _envnum("DOCKET_MEM_CRIT", 10)  # % of RAM available
 DISK_WARN, DISK_CRIT = _envnum("DOCKET_DISK_WARN_GB", 10), _envnum("DOCKET_DISK_CRIT_GB", 3)  # swap lives on disk
-RELIEF = re.compile(r"^\s*(?:sudo\s+)?(?:kill|pkill|killall|ps|top|htop|pgrep|free|vm_stat|memory_pressure|sysctl|"
+RELIEF = re.compile(r"^\s*(?:sudo\s+)?(?:rtk\s+)?(?:kill|pkill|killall|ps|top|htop|pgrep|free|vm_stat|memory_pressure|sysctl|"
                     r"df|du|uptime|jobs|wait|rm|ls|cat|head|tail|grep|wc|echo|docker\s+(?:stop|kill|rm|ps|system\s+prune)|"
                     r"git\s+(?:status|log|diff|add|commit|push|stash)|\S*python3?\s+\S*docket\.py)\b")
 HEAVY = re.compile(r"\b(?:make|cmake|ninja|go\s+(?:build|test|run|vet)|cargo|rustc|mvn|gradlew?|javac|npm|pnpm|yarn|"
@@ -1005,10 +1005,33 @@ def rebuild(root, write=True):
     return st
 
 
+# Secret patterns adapted from everything-claude-code (MIT). Each is anchored on a literal and uses
+# bounded classes, so matching stays linear on long prompts.
+SECRETS = [
+    (re.compile(r"-----BEGIN[A-Z ]{0,40}PRIVATE KEY-----[\s\S]*?(?:-----END[A-Z ]{0,40}PRIVATE KEY-----|\Z)"), "[REDACTED]"),
+    (re.compile(r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,255}|github_pat_[A-Za-z0-9_]{20,255}|(?:AKIA|ASIA)[A-Z0-9]{16}"
+                r"|sk-[A-Za-z0-9_-]{20,255})\b"), "[REDACTED]"),
+    (re.compile(r"(?i)((?:api[_-]?key|secret|token|passw(?:or)?d|authorization|credentials?|auth)[\"']?\s{0,3}[:=]\s{0,3}"
+                r"[\"']?(?:(?:bearer|basic|token)\s+)?)[A-Za-z0-9_\-/.+=~]{8,512}"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9_\-/.+=~]{8,512}"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]{1,20}://[^\s:/@\"']{1,256}:)[^\s@/\"']{1,256}(?=@)"), r"\1[REDACTED]"),
+]
+SCRUB_KEYS = ("title", "body", "prompt", "desc", "now", "done", "next", "blocked", "evidence", "rejected", "reason")
+
+
+def scrub(s):
+    for rx, rep in SECRETS:
+        s = rx.sub(rep, s)
+    return s
+
+
 def emit(root, _guard=None, **ev):
     """Append one event. _guard(st, lock) runs under the lock against fresh state and
     raises Conflict to refuse the write (compare-and-swap, conditional leases)."""
     ensure_board(root)
+    for k in SCRUB_KEYS:  # nothing secret reaches the log, so nothing secret is ever synced
+        if isinstance(ev.get(k), str):
+            ev[k] = scrub(ev[k])
     ev.setdefault("ts", now())
     ev.setdefault("id", uuid.uuid4().hex[:10])
     ev.setdefault("agent", "main")
@@ -1637,9 +1660,24 @@ def handle_hook(inp):
         if dv:
             emit(root, kind="directive_seen", ids=[d_["id"] for d_ in directives(st)], title="Read the directives", **E)
         start_rouser(root, st)
-        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), resumed, ident, team_block(st, sid), dv, g,
-                                                  pinned_block(st), digest) if x))
+        head = "\n".join(x for x in (context_for(root, sid, "main"), resumed, ident,
+                                     brief_reminder(st, sid) if inp.get("source") == "compact" else None) if x)
+        rest = "\n".join(x for x in (team_block(st, sid), dv, g, pinned_block(st), digest) if x)
+        if len(head) + len(rest) > CTX_CAP:  # a long board must not crowd out the session's own context
+            rest = rest[:max(0, CTX_CAP - len(head))].rsplit("\n", 1)[0] + "\n(more: %s who / board / digest)" % cli()
+        hook_output(event, "\n".join(x for x in (head, rest) if x))
         sync_later(root)  # pull what other machines pushed
+
+    elif event == "PreCompact":  # the summary may drop the brief: say it again, and re-arm the context nudges
+        _, st = emit(root, kind="compact", title="Context compacting (%s)" % (inp.get("trigger") or "auto"), **E)
+        for x in ("", ".warn", ".crit"):  # the reading is stale until the status line reports again
+            try:
+                os.remove(ctx_file(root, sid) + x)
+            except OSError:
+                pass
+        msg = brief_reminder(st, sid)
+        if msg:
+            print(json.dumps({"systemMessage": msg}))
 
     elif event == "UserPromptSubmit":
         prompt = inp.get("prompt") or ""
@@ -1681,6 +1719,8 @@ def handle_hook(inp):
         deny, warn = mem_guard(root, sid, who, inp.get("tool_name"), inp.get("tool_input") or {})
         if not deny and inp.get("tool_name") in ("Agent", "Task") and os.path.exists(os.path.join(bdir(root), "paused")):
             deny = "The user paused all sessions: no new agents until they run resume. Finish your step and write your brief."
+        if not deny and inp.get("tool_name") == "Bash" and os.environ.get("DOCKET_NOVERIFY_GUARD") != "off":
+            deny = hook_bypass((inp.get("tool_input") or {}).get("command"))
         if deny:
             print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
                                                      "permissionDecisionReason": deny}}))
@@ -1790,7 +1830,7 @@ def handle_hook(inp):
             first = next((l.strip("# ").strip() for l in plan.splitlines() if l.strip()), "Plan")
             emit(root, kind="plan", title=clip(first, 120), body=clip(plan, 8000), **E)
         if who == "main":  # mail, new goals and a stale-brief nudge reach a session mid-turn
-            out = [deliver(root, sid) if mail_waiting(root, sid) else None, tidy_nudge(root, sid)]
+            out = [deliver(root, sid) if mail_waiting(root, sid) else None, tidy_nudge(root, sid), ctx_nudge(root, sid)]
             if any(out):
                 hook_output(event, "\n".join(x for x in out if x))
 
@@ -2223,14 +2263,42 @@ def start_rouser(root, st):
         pass
 
 
+def cmd_segments(cmd):
+    """Each simple command, wrappers (sudo, rtk, VAR=...) stripped; heredoc bodies are data, not commands."""
+    cmd = re.sub(r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\s*\1\b", "", cmd or "", flags=re.S)
+    return [re.sub(r"^\s*(?:(?:sudo|time|nohup|rtk|nice(?:\s+-n\s*\d+)?|exec)\s+|\w+=\S*\s+)*", "", seg)
+            for seg in re.split(r"&&|\|\||[;|\n]", cmd)]
+
+
 def is_heavy(cmd):
     """A build, test run, container or scan in command position (not just named in a message or heredoc)."""
-    cmd = re.sub(r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\s*\1\b", "", cmd or "", flags=re.S)  # heredoc bodies are data
-    for seg in re.split(r"&&|\|\||[;|\n]", cmd):
-        seg = re.sub(r"^\s*(?:(?:sudo|time|nohup|nice(?:\s+-n\s*\d+)?|exec)\s+|\w+=\S*\s+)*", "", seg)
-        if HEAVY.match(seg) or re.match(r"\S+\.sh\b", seg):
-            return True
-    return False
+    return any(HEAVY.match(seg) or re.match(r"\S+\.sh\b", seg) for seg in cmd_segments(cmd))
+
+
+def hook_bypass(cmd):
+    """A git commit/push told to skip the repo's hooks (--no-verify, commit -n, -c core.hooksPath=)."""
+    for seg in cmd_segments(cmd):
+        try:
+            t = shlex.split(seg)  # a quoted commit message is one token, so its words never match
+        except ValueError:
+            t = seg.split()
+        if t[:1] != ["git"]:
+            continue
+        i, cfg = 1, []
+        while i < len(t) and t[i].startswith("-"):  # git's own options, before the subcommand
+            if t[i] in ("-c", "-C") and i + 1 < len(t):
+                cfg.append(t[i + 1] if t[i] == "-c" else "")
+                i += 1
+            i += 1
+        sub, args = (t[i] if i < len(t) else ""), t[i + 1:]
+        args = args[:args.index("--")] if "--" in args else args
+        if sub not in ("commit", "push"):
+            continue
+        if any(c.lower().startswith("core.hookspath") for c in cfg) or "--no-verify" in args or (
+                sub == "commit" and any(re.match(r"-[^-mFcCt]*n", a) for a in args)):
+            return ("Don't skip git hooks: one session skipping checks skips them for every session. Fix what the "
+                    "hook reports, then commit again.")
+    return None
 
 
 def memory(root="/"):
@@ -2536,6 +2604,58 @@ def tidy_nudge(root, sid, st=None):
     if not text:  # nothing due: look again in five minutes, not on every tool call
         os.utime(f, (now() - TIDY_SECS + 300,) * 2)
     return text
+
+
+CTX_WARN, CTX_CRIT = _envnum("DOCKET_CTX_WARN", 65), _envnum("DOCKET_CTX_CRIT", 75)  # % of the context window used
+CTX_CAP = 8000  # chars of SessionStart context
+
+
+def ctx_file(root, sid):
+    return os.path.join(bdir(root), "ctx", re.sub(r"[^\w-]", "_", sid))
+
+
+def note_ctx(root, sid, inp):
+    """statusline: keep the session's context use in a small file (not an event: the status line runs often)."""
+    cw = inp.get("context_window") or {}
+    try:
+        used = cw["used_percentage"] if cw.get("used_percentage") is not None else 100 - cw["remaining_percentage"]
+        used = int(float(used))
+    except (KeyError, TypeError, ValueError):
+        return
+    try:
+        os.makedirs(os.path.dirname(ctx_file(root, sid)), exist_ok=True)
+        with open(ctx_file(root, sid), "w") as f:
+            f.write(str(used))
+    except OSError:
+        pass
+
+
+def ctx_nudge(root, sid):
+    """Once per level (warn, critical) until the next compaction: rewrite the brief before context runs out."""
+    f = ctx_file(root, sid)
+    try:
+        with open(f) as fh:
+            used = int(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        return None
+    level = "crit" if used >= CTX_CRIT else "warn" if used >= CTX_WARN else None
+    if not level or os.path.exists(f + "." + level):
+        return None
+    open(f + "." + level, "w").close()
+    return ("<docket>Context is %d%% used: rewrite your brief now (%s log brief \"<title>\" --now --done --next "
+            "--session %s) so nothing is lost at compaction.</docket>" % (used, cli(), sid))
+
+
+def brief_reminder(st, sid):
+    """What a session must still know after compaction: its work item and its last brief."""
+    s = st["sessions"].get(sid, {})
+    b = s.get("brief") if isinstance(s.get("brief"), dict) else {}
+    if not s.get("work") and not b:
+        return None
+    return ("<docket-compact>Context was compacted. You are on %s. Your brief: now %s; next %s. Rewrite it if it is "
+            "out of date (%s log brief ... --now --done --next --session %s).</docket-compact>" % (
+                "%s %s" % (s["work"], clip(st["work"].get(s["work"], {}).get("title"), 80)) if s.get("work") else "no work item",
+                b.get("now") or "-", b.get("next") or "-", cli(), sid))
 
 
 def wake(st, ev, text=None):
@@ -3296,6 +3416,8 @@ def main():
             return 0  # not a docket project: say nothing, create nothing
         st = load_state(root)
         me = inp_.get("session_id") or ""
+        if me:
+            note_ctx(root, me, inp_)
         parts = []
         nu = len(needs_user(st))
         if nu:

@@ -19,6 +19,7 @@ OLD_MARKS = ("board.py\" hook",)  # installs from before the rename (agent-board
 
 EVENTS = [
     ("SessionStart", None),
+    ("PreCompact", None),  # repeat the brief so compaction keeps it
     ("UserPromptSubmit", None),
     ("PreToolUse", "Agent|Task|Bash|Edit|Write|MultiEdit|NotebookEdit"),  # leases; memory guard
     ("PostToolUse", None),  # every tool: task lists, plans and edits, plus mail delivered mid-turn

@@ -150,7 +150,12 @@ Many sessions, subagents and builds on one machine can exhaust memory and, once 
 disk, force a restart. Before every shell command and agent spawn docket checks memory pressure
 and free disk. When it's critical, new agents and heavy commands are refused (freeing memory
 still works) and every session is told. When it's tight, heavy jobs and extra subagents only get a
-warning, since lag is acceptable. `docket.py mem` shows the biggest processes.
+warning, since lag is acceptable. `docket.py mem` shows the biggest processes. Commands run
+through `rtk` are judged by what they run.
+
+Context is guarded the same way: the status line records how full each session's context is, and
+at 65% and 75% the session is told to rewrite its brief; PreCompact and the post-compaction start
+hand the brief back. SessionStart context is capped at ~8000 chars, the session's own part first.
 
 ## Directives from the user
 
@@ -223,6 +228,11 @@ builds on it still looks like it succeeded. Docket treats its own record as susp
   sessions wrote can't edit files or adopt tasks until it has logged that review
   (`DOCKET_REVIEW=warn|off` to soften). Entries the review finds false are superseded, struck
   through and listed as corrected claims.
+- Secrets are scrubbed from every event before it is written (GitHub/AWS/`sk-` keys, Bearer
+  tokens, `password=`-style values, PEM keys, DSN passwords; patterns adapted from
+  everything-claude-code, MIT), so they never reach the log or the git ref.
+- `git commit --no-verify` (or `-n`), `git push --no-verify` and `-c core.hooksPath=` are refused:
+  one session skipping checks skips them for every session (`DOCKET_NOVERIFY_GUARD=off`).
 
 ## Files
 
