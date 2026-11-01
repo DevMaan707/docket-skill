@@ -74,7 +74,7 @@ def _envnum(k, d):
 MEM_WARN, MEM_CRIT = _envnum("DOCKET_MEM_WARN", 20), _envnum("DOCKET_MEM_CRIT", 10)  # % of RAM available
 DISK_WARN, DISK_CRIT = _envnum("DOCKET_DISK_WARN_GB", 10), _envnum("DOCKET_DISK_CRIT_GB", 3)  # swap lives on disk
 RELIEF = re.compile(r"^\s*(?:sudo\s+)?(?:rtk\s+)?(?:kill|pkill|killall|ps|top|htop|pgrep|free|vm_stat|memory_pressure|sysctl|"
-                    r"df|du|uptime|jobs|wait|rm|ls|cat|head|tail|grep|wc|echo|docker\s+(?:stop|kill|rm|ps|system\s+prune)|"
+                    r"df|du|uptime|jobs|wait|rm|ls|cat|head|tail|grep|wc|echo|awk|sort|uniq|cut|tr|lsof|footprint|vmmap|docker\s+(?:stop|kill|rm|ps|system\s+prune)|"
                     r"git\s+(?:status|log|diff|add|commit|push|stash)|\S*python3?\s+\S*docket\.py|docket)\b")
 HEAVY = re.compile(r"\b(?:make|cmake|ninja|go\s+(?:build|test|run|vet)|cargo|rustc|mvn|gradlew?|javac|npm|pnpm|yarn|"
                    r"bun|tsc|webpack|vite|jest|vitest|pytest|docker|podman|bazel|clang|gcc|g\+\+|xcodebuild|swift\s+build|"
@@ -2765,7 +2765,8 @@ def cmd_segments(cmd):
     """Each simple command, wrappers (sudo, rtk, VAR=...) stripped; heredoc bodies are data, not commands."""
     cmd = re.sub(r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\s*\1\b", "", cmd or "", flags=re.S)
     return [re.sub(r"^\s*(?:(?:sudo|time|nohup|rtk|nice(?:\s+-n\s*\d+)?|exec)\s+|\w+=\S*\s+)*", "", seg)
-            for seg in re.split(r"&&|\|\||[;|\n]", cmd)]
+            for seg in re.split(r"\x00", re.sub(r"""('[^']*'|"(?:\\.|[^"\\])*")|&&|\|\||[;|\n]""",
+                                                 lambda m: m.group(1) or "\x00", cmd))]  # quoted ; and | stay put
 
 
 def light(cmd):
