@@ -117,7 +117,8 @@ CHARTER = """How to work under it (autonomous mode, set by the user):
 MSG_KINDS = {"fyi": "FYI", "finding": "FINDING (verify before acting)", "ask": "ASKS YOU TO ACT"}
 SYNC_REF = "refs/docket/log"  # the record's git history, kept off every branch
 ENTRY_KINDS = ["plan", "decision", "status", "blocker", "unblock", "done", "summary",
-               "note", "fact", "review", "brief", "output", "task", "deadend"]
+               "note", "fact", "review", "brief", "output", "task", "deadend",
+               "hypothesis"]
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 WORK_TYPES = ["theme", "feature", "optimization", "improvement", "bug", "investigation",
               "refactor", "research", "chore"]
@@ -757,6 +758,8 @@ def apply(st, ev):
         for d_ in st.get("directives", []):
             if d_["id"] == ev.get("ref"):
                 d_.update(active=False, droppedTs=ts, droppedBy=sid)
+    elif kind == "constitution_seen":
+        s["conSeen"] = ev.get("hash")
     elif kind == "directive_seen":
         s["dirSeen"] = sorted(set(s.get("dirSeen", [])) | set(ev.get("ids") or []))
     elif kind == "goal_seen":
@@ -1133,11 +1136,12 @@ def work_report(root, st, wid):
             "brief": briefs[-1] if briefs else None,
             "decisions": [e for e in entries if e["kind"] == "decision"],
             "deadends": [e for e in active if e["kind"] == "deadend"],
+            "hypotheses": [e for e in active if e["kind"] == "hypothesis"],
             "reviews": [e for e in entries if e["kind"] == "review"],
             "blockers": [e for e in active if e["kind"] == "blocker" and not e.get("resolved")],
             "summaries": [e for e in active if e["kind"] in ("summary", "output")],
             "plans": [e for e in active if e["kind"] == "plan"],
-            "corrected": [e for e in entries if e.get("supersededBy") and e["kind"] != "decision"]}
+            "corrected": [e for e in entries if e.get("supersededBy") and e["kind"] not in ("decision", "hypothesis")]}
 
 
 def selves(st, sid):
@@ -1153,6 +1157,12 @@ def sname(st, sid):
 def prov(st, e):
     return "%s · %s · %s" % (sname(st, e["sid"]), e["agent"], time.strftime(
         "%Y-%m-%d %H:%M", time.localtime(e["ts"])))
+
+
+def hyp_line(e):
+    v, t = e.get("verdict") or "open", flag_suspicious(e["title"])
+    return "[%s] %s%s (id %s)" % (v.upper(), "~~%s~~" % t if v == "refuted" else t,
+                                  " | evidence: `%s`" % e["evidence"] if e.get("evidence") else "", e["id"])
 
 
 def render_page(root, st, wid):
@@ -1262,6 +1272,11 @@ def render_page(root, st, wid):
         for e in r["deadends"]:
             A("- **%s**%s  _(%s)_" % (e["title"], ": " + flag_suspicious(e["body"]).replace("\n", " ") if e.get("body") else "",
                                       prov(st, e)))
+        A("")
+    if r["hypotheses"]:
+        A("## Hypotheses  _(refuted ones are ruled out: don't re-test without new evidence)_")
+        for e in r["hypotheses"]:
+            A("- %s  _(%s)_" % (hyp_line(e), prov(st, e)))
         A("")
     if r["corrected"]:
         A("## Corrected claims  _(superseded; do not rely on them)_")
@@ -1578,6 +1593,9 @@ def prior_work_block(root, st, sid, prompt):
                        sum(f["trust"] == "verified" for f in r["facts"]),
                        sum(f["trust"] == "stale" for f in r["facts"]), len(r["reviews"]),
                        clip(flag_suspicious(b and (b.get("now") or b.get("title")) or "none"), 140)))
+        hs = [e for e in r["hypotheses"] if e.get("verdict") != "confirmed"][-6:]
+        if hs:  # so nobody re-tests a ruled-out cause
+            out.append("  Hypotheses (refuted = ruled out; open = untested): " + "; ".join(clip(hyp_line(e), 200) for e in hs))
     out += [CRITIQUE % (c, c, c),
             "Then attach to it (%s work attach W-xxxx --session %s) rather than starting parallel "
             "work. If your task is a separate part of a matched item, create a sub-item instead: "
@@ -1636,8 +1654,11 @@ def handle_hook(inp):
         dv = directives_block(st)
         if dv:
             emit(root, kind="directive_seen", ids=[d_["id"] for d_ in directives(st)], title="Read the directives", **E)
+        cv = constitution_block(root)
+        if cv:
+            emit(root, kind="constitution_seen", hash=constitution(root)[1], title="Read the constitution", **E)
         start_rouser(root, st)
-        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), resumed, ident, team_block(st, sid), dv, g,
+        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), resumed, ident, team_block(st, sid), dv, cv, g,
                                                   pinned_block(st), digest) if x))
         sync_later(root)  # pull what other machines pushed
 
@@ -1661,6 +1682,11 @@ def handle_hook(inp):
                if added else None,
                directives_block(st, only=old, full=False) if old else None,
                goal_block(st, full=False) if seen else None, stale_brief(st, sid), deliver(root, sid, st)]
+        ch = constitution(root)[1]
+        if ch and st["sessions"][sid].get("conSeen") != ch:
+            ctx.append('<docket-constitution hash="%s">The user changed the project constitution. Re-read it before your next '
+                       'plan or decision: %s constitution</docket-constitution>' % (ch, cli()))
+            emit(root, kind="constitution_seen", hash=ch, title="Read the constitution", **E)
         nb, nids = needs_block(st, sid)
         if nids:
             ctx.append(nb)
@@ -2094,6 +2120,32 @@ def directives_block(st, only=None, full=True):
                       "conflicts with your current plan, change the plan, and say so on the board."] +
                      ["%d. [%s] %s" % (i + 1, d_["id"][:6], d_["text"].strip()) for i, d_ in enumerate(ds)] +
                      ["</docket-directives>"])
+
+
+def constitution_path(root):
+    p = os.path.join(root, "CONSTITUTION.md")
+    return p if os.path.exists(p) else os.path.join(bdir(root), "constitution.md")
+
+
+def constitution(root):
+    """The user's project principles (C-1, C-2, ...) and a short hash; hand edits count."""
+    try:
+        with open(constitution_path(root), encoding="utf-8") as f:
+            t = f.read().strip()
+    except OSError:
+        return "", ""
+    return t, hashlib.sha1(t.encode()).hexdigest()[:8] if t else ""
+
+
+def constitution_block(root):
+    t, h = constitution(root)
+    if not t:
+        return None
+    return "\n".join(['<docket-constitution from="the user" hash="%s">' % h,
+                      "The project's constitution: the user's principles. Plans, decisions and reviews must respect "
+                      "them and cite them by number (C-1, ...). Only the user changes them.",
+                      clip(t, 2000) + ("\n(cut; full text: %s constitution)" % cli() if len(t) > 2000 else ""),
+                      "</docket-constitution>"])
 
 
 def agent_cap(st):
@@ -3077,6 +3129,8 @@ def main():
     lg.add_argument("--rejected", help="decision: the option(s) you did not choose and why")
     lg.add_argument("--evidence", help="fact: file:line, or the command you ran and its result")
     lg.add_argument("--verdict", choices=["sound", "partial", "wrong", "unverified"], help="review")
+    lg.add_argument("--confirmed", dest="hyp", action="store_const", const="confirmed", help="hypothesis: tested and true")
+    lg.add_argument("--refuted", dest="hyp", action="store_const", const="refuted", help="hypothesis: tested and false")
     lg.add_argument("--supersedes", help="id(s) of earlier entries this corrects, comma-separated")
     lg.add_argument("--expect", help="rev you last read; refuse if others changed the item since")
     for k in ("now", "done", "next", "blocked"):
@@ -3209,6 +3263,11 @@ def main():
     dr.add_argument("--prompt-from", action="append", default=[])
     dr.add_argument("--session", **sess)
     sub.add_parser("directives", help="the user's directives every session must follow")
+    cn = sub.add_parser("constitution", help="the project's principles (the user's): show, add, drop")
+    cn.add_argument("action", nargs="?", default="show", choices=["show", "add", "drop"])
+    cn.add_argument("text", nargs="?", default="", help="add: the user's words; drop: the number (C-3 or 3)")
+    cn.add_argument("--prompt-from", action="append", default=[])
+    cn.add_argument("--session", **sess)
     wt_ = sub.add_parser("wait", help="say you're waiting on a job, so the standing goal lets you stop until it ends")
     wt_.add_argument("what")
     wt_.add_argument("--minutes", type=int, default=30)
@@ -3473,6 +3532,38 @@ def main():
         cap = agent_cap(st)
         if cap is not None:
             print("Enforced: at most %d parallel subagents per session." % cap)
+        return 0
+    if a.cmd == "constitution":
+        t, h = constitution(root)
+        if a.action == "show":
+            print("%s\n\n(%s, hash %s)" % (t, constitution_path(root), h) if t else
+                  "No constitution. The user adds principles with: constitution add \"<principle>\"")
+            return 0
+        if not a.text.strip():
+            sys.exit("Give the principle (add) or its number (drop).")
+        if a.action == "add":
+            if not user_said(root, sid, a.text, a.prompt_from):
+                sys.exit("Refused: a principle must be the user's own words, and this text isn't in any prompt the user "
+                         "typed in this session.")
+            n = str(max([int(x) for x in re.findall(r"(?m)^\s*(?:[-*]\s*)?C-(\d+)\b", t)], default=0) + 1)
+            t = (t or "# Project constitution\n\nThe user's principles. Cite them by number in plans and reviews.\n") + \
+                "\nC-%s. %s" % (n, " ".join(a.text.split()))
+        else:
+            n = re.sub(r"(?i)^c-", "", a.text.strip())
+            if not user_said(root, sid, "constitution", a.prompt_from, ("drop", "remove", "delete")):
+                sys.exit("Refused: only the user can drop a principle.")
+            lines = t.splitlines()
+            keep = [l for l in lines if not re.match(r"\s*(?:[-*]\s*)?C-%s\b" % re.escape(n), l)]
+            if len(keep) == len(lines):
+                sys.exit("No principle C-%s." % n)
+            t = "\n".join(keep)
+        p = constitution_path(root)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(t.strip() + "\n")
+        emit(root, sid=sid, kind="msg", to=["board"], title="The user %s constitution principle C-%s" % (
+            "added" if a.action == "add" else "dropped", n), body=a.text)
+        print("C-%s %s; sessions see the change with their next prompt" % (n, "added" if a.action == "add" else "dropped"))
         return 0
     if a.cmd == "directive":
         if a.action == "add":
@@ -3935,6 +4026,12 @@ def main():
         ev["head"] = git_head(root)
     if a.kind == "review" and a.verdict:
         ev["verdict"] = a.verdict
+    if a.kind == "hypothesis" and a.hyp:  # open until settled; settle with --supersedes <id> --refuted|--confirmed
+        if not a.evidence:
+            sys.exit("A settled hypothesis needs --evidence (the command you ran and what it showed).")
+        ev["verdict"] = a.hyp
+    if a.kind == "hypothesis" and a.evidence:
+        ev["evidence"] = clip(a.evidence, 500)
     if a.kind == "brief":
         for k in ("now", "done", "next", "blocked"):
             if getattr(a, k):

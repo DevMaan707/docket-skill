@@ -159,6 +159,16 @@ Start any prompt line with `@all` and it becomes a directive every session and a
 on unseen repos`. Live sessions get it mid-turn, subagents get it at start, and each prompt
 carries a short reminder. Subagent limits are enforced. Agents can't invent or drop directives.
 
+## Engineering discipline
+
+`references/` holds four short guides the skill points sessions at when they matter: a premise
+check before a plan, systematic debugging, verification before claiming done, and a review
+checklist. Debugging hypotheses go on the record (`docket.py log hypothesis "<claim>"`, later
+settled `--refuted` or `--confirmed` with evidence), so no session re-tests a ruled-out cause. A
+project constitution (`CONSTITUTION.md`, or `.docket/constitution.md`) holds the user's numbered
+principles; every session gets it at start and a reminder when it changes, and only the user can
+change it.
+
 ## A standing goal, divided between sessions
 
 `docket.py goal set "<the user's words>" --autonomous` gives every session and agent the user's
@@ -263,6 +273,11 @@ each of these does part of it well:
   leases for coding agents over an MCP server, archived in git. Docket's messages follow its model.
 - [git-bug](https://github.com/git-bug/git-bug): issues stored in git objects on their own refs and
   pushed and pulled like code. Docket's `refs/docket/log` is the same idea.
+
+The guides in `references/` are adapted, under the MIT License, from
+[superpowers](https://github.com/obra/superpowers) by Jesse Vincent (systematic debugging,
+verification before completion) and [gstack](https://github.com/garrytan/gstack) by Garry Tan
+(review checklist, plan premise review).
 
 Background: [How contexts fail](https://dbreunig.com/2025/06/22/how-contexts-fail-and-how-to-fix-them.html),
 [OWASP ASI06: memory and context poisoning](https://www.pointguardai.com/glossary/owasp-asi06-memory-and-context-poisoning).

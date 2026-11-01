@@ -360,6 +360,33 @@ outside your branches, so it never shows up in `main`, PRs or `git status`. File
   the new id from then on.
 - `DOCKET_GIT=off` turns automatic syncing off.
 
+## 4e. Engineering discipline
+
+Short references in `~/.claude/skills/docket/references/`. Read the one that fits, at the moment
+it fits:
+
+- **Before a plan:** `premise-check.md`. Real problem, outcome, cost of doing nothing, smallest
+  version, reuse map, alternatives, scope mode; put the answers at the top of the `plan`.
+- **When debugging:** `debugging.md`. No fix without a root cause; after 3 failed fixes, question the
+  design. Log every hypothesis so no session re-tests a ruled-out cause:
+  `$B log hypothesis "<claim>" --work W-xxxx`, then settle it with
+  `$B log hypothesis "<claim>" --supersedes <id> --refuted|--confirmed --evidence "<command: result>"`.
+  The work page lists them (refuted ones struck through), and so does the prior-work block.
+- **Before claiming done:** `verification.md`. Every claim needs fresh evidence you ran this turn.
+- **When reviewing:** `review-checklist.md`. Two passes, sideways sweep, fix first,
+  blocker/should/nit, every safety claim cites a line; zero findings is a valid result.
+
+**The constitution.** The user's standing principles for the project (`CONSTITUTION.md` at the repo
+root, else `.docket/constitution.md`), numbered C-1, C-2, …. Every session gets it at start, and a
+one-line reminder when it changes. Plans, decisions and reviews respect it and cite the principles
+they touch. `$B constitution` shows it. Only the user changes it: `$B constitution add
+"<their words>"` (refused unless it's in their prompt) and `$B constitution drop C-n`; they may
+also edit the file by hand.
+
+**Clarify, don't guess, and don't stall.** At most 5 questions to the user per work item, each with
+the options and your recommended one (`$B msg user "..." --kind ask`). Keep working on what
+doesn't depend on the answer, and record each answer as a `decision` (with what was rejected).
+
 ## 5. Trust rules (against context poisoning)
 
 A wrong "fact" in shared memory gets repeated by every session that reads it.
