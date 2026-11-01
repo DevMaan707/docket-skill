@@ -142,7 +142,12 @@ The journal's **Board** page shows pinned notices, threads and messages with rea
   Claude Code's status line. It prints nothing outside docket projects.
 - **Relaunch:** `docket.py relaunch` prints `cd … && claude --resume <id>` for every recent session.
 - **No forgotten tasks:** every stale or unowned task is assigned to one live session, which has to
-  settle it before it can go idle. Tasks a recent commit seems to cover are flagged `DONE?`.
+  settle it before it can go idle. Tasks a recent commit seems to cover (or names: `Docket: W-0012/AC1`)
+  are flagged `DONE?`.
+- **Done means done:** `--done-when` criteria (text or a metric like `sast.fn<=0`) become tasks on the
+  item; `work status done` is refused until they are met and someone other than the builder logged a
+  sound review since the last edit (`--force --reason` overrides, logged). Reviews are pinned to the
+  files' hashes and go STALE in `check`. A subagent claiming success with no edits or test runs is flagged.
 
 ## Protects the machine
 
