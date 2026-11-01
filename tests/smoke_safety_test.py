@@ -103,6 +103,28 @@ def _main(d):
     a.pop("index", None); b.pop("index", None)
     check("rebuild reproduces state with compact events", a == b)
 
+    # bugs seen live in xyla: flags agents pass everywhere, bare pending/check, guard blocking docket itself
+    for args in (["who", "--session", "sS"], ["audit", "--session", "sS", "--agent", "main"],
+                 ["--session", "sS", "lanes"], ["work", "list", "--session=sS"]):
+        code, out = run(args, d)
+        check("%s takes --session/--agent" % args[0], code == 0 and "unrecognized" not in out, out[-200:])
+    run(["work", "new", "Login form", "-k", "login"], d, session="sS")
+    code, out = run(["pending"], d, session="sS")
+    check("pending defaults to the session's item", code == 0 and "required" not in out, out[-200:])
+    for c, want in (('cd /x; python3 /a/docket.py reply 12 "hi"', True), ("D=/a/docket.py; S=x; python3 $D who", True),
+                    ('B="python3 /a/docket.py"; $B who', True), ('d(){ python3 /a/docket.py "$@"; }; d reply 1 "x"', True),
+                    ("cd x && go test ./...", False), ("python3 scan.py", False), ("X=1; python3 $X", False)):
+        check("memory guard: %s is %s" % (c, "light" if want else "new work"), docket.light(c) == want)
+    other = os.path.join(d, "other")
+    os.makedirs(os.path.join(other, ".docket"))
+    old = os.environ.get("DOCKET_ROOT")
+    os.environ["DOCKET_ROOT"] = d
+    try:
+        check("a folder's own .docket wins over DOCKET_ROOT", docket.find_root(other) == os.path.realpath(other))
+        check("DOCKET_ROOT still covers folders without one", docket.find_root("/") == os.path.realpath(d))
+    finally:
+        os.environ.pop("DOCKET_ROOT") if old is None else os.environ.__setitem__("DOCKET_ROOT", old)
+
 
 if __name__ == "__main__":
     sys.exit(main())

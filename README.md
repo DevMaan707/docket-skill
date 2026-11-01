@@ -30,6 +30,8 @@ cd your-repo && python3 ~/.claude/skills/docket/scripts/install.py --project
 
 Start a new `claude` session, then open `./.docket/index.html` in a browser, or run
 `python3 ~/.claude/skills/docket/scripts/docket.py open`. Windows: use `python` instead of `python3`.
+When `~/.local/bin` is on your PATH, the installer also adds a `docket` command (`docket who`,
+`docket open`), and the hints sessions see use it.
 
 Remove the hooks with `install.py --uninstall`. Turn Docket off for one session with
 `DOCKET_DISABLE=1 claude`, or name a session up front with `DOCKET_NAME="auth refactor" claude`.

@@ -30,6 +30,27 @@ EVENTS = [
 ]
 
 
+def launcher(remove):
+    """A `docket` command on PATH, so agents type `docket who` instead of aliasing the long path
+    (B="python3 .../docket.py"; $B who fails in zsh, which doesn't word-split $B)."""
+    d = os.path.expanduser("~/.local/bin")
+    if os.name == "nt" or d not in os.environ.get("PATH", "").split(os.pathsep):
+        return
+    f = os.path.join(d, "docket")
+    ours = os.path.exists(f) and BOARD in open(f, encoding="utf-8", errors="replace").read()
+    if remove:
+        if ours:
+            os.remove(f)
+        return
+    if os.path.exists(f) and not ours:
+        print("Left %s alone: it isn't docket's." % f)
+        return
+    with open(f, "w") as fh:
+        fh.write('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, BOARD))
+    os.chmod(f, 0o755)
+    print("Added the `docket` command: " + f)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", action="store_true")
@@ -71,6 +92,7 @@ def main():
     if not hooks:
         settings.pop("hooks")
 
+    launcher(a.uninstall)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
         f.write("\n")

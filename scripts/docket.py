@@ -257,17 +257,19 @@ def process_gone(s):
 
 
 def find_root(start=None):
-    env = os.environ.get("DOCKET_ROOT")
-    if env and os.path.isdir(env):
-        return os.path.realpath(env)
+    """The .docket above the folder you're in; else DOCKET_ROOT (the session's project, exported at start,
+    so a session that cd'd to /tmp still writes home). A folder with its own .docket wins over the env:
+    a session that cd's into another project must not write into its own record."""
     d = os.path.realpath(start or os.getcwd())
     while True:
         if os.path.isdir(os.path.join(d, DIRNAME)):
             return d
         parent = os.path.dirname(d)
         if parent == d:
-            return os.path.realpath(start or os.getcwd())
+            break
         d = parent
+    env = os.environ.get("DOCKET_ROOT")
+    return os.path.realpath(env) if env and os.path.isdir(env) else os.path.realpath(start or os.getcwd())
 
 
 def bdir(root):
@@ -1659,8 +1661,19 @@ class Parser(argparse.ArgumentParser):
         sys.exit(2)
 
 
+_CLI = []
+
+
 def cli():
-    return '%s "%s"' % ("python" if os.name == "nt" else "python3", SCRIPT)
+    """How hints spell the command: `docket` when install.py put a launcher for this script on PATH."""
+    if not _CLI:
+        w = shutil.which("docket")
+        try:
+            ok = bool(w) and SCRIPT in open(w, encoding="utf-8", errors="replace").read(4096)
+        except OSError:
+            ok = False
+        _CLI.append("docket" if ok else '%s "%s"' % ("python" if os.name == "nt" else "python3", SCRIPT))
+    return _CLI[0]
 
 
 def context_for(root, sid, who, wid=None):
@@ -2529,6 +2542,21 @@ def cmd_segments(cmd):
             for seg in re.split(r"&&|\|\||[;|\n]", cmd)]
 
 
+def light(cmd):
+    """Every simple command frees memory, looks around, or talks through docket, including via a variable
+    or helper holding docket's path (D=.../docket.py; $D reply ..., or d(){ python3 .../docket.py "$@"; })."""
+    names = set(re.findall(r"(\w+)=['\"]?[^\s;'\"]*(?:python3?\s+)?\S*docket\.py", cmd or "")) | set(
+        re.findall(r"(\w+)\s*\(\)\s*\{[^}]*docket\.py", cmd or ""))
+    for seg in cmd_segments(cmd):
+        seg = seg.strip()
+        if not seg or RELIEF.match(seg) or "docket.py" in seg or re.match(r"(?:cd|export|unset|true)\b|[{}]$|\w+=", seg):
+            continue
+        m = re.match(r"(?:\S*python3?\s+)?['\"]?\$\{?(\w+)|(\w+)\b", seg)
+        if not (m and (m.group(1) or m.group(2)) in names):
+            return False
+    return True
+
+
 def is_heavy(cmd):
     """A build, test run, container or scan in command position (not just named in a message or heredoc)."""
     return any(HEAVY.match(seg) or re.match(r"\S+\.sh\b", seg) for seg in cmd_segments(cmd))
@@ -2642,7 +2670,7 @@ def mem_guard(root, sid, who, tool, ti):
     cmd = (ti.get("command") or "") if tool == "Bash" else ""
     if m["level"] == "critical":
         note_critical(root, sid, who, why)
-        if tool in ("Agent", "Task") or not RELIEF.match(cmd):
+        if tool in ("Agent", "Task") or not light(cmd):
             return ("This machine is close to running out of memory (%s). Lag is acceptable, a forced shutdown is "
                     "not, so new work is refused until it recovers. Free memory first: stop background jobs and "
                     "agents you don't need (%s mem shows the biggest processes), wait for running builds, then "
@@ -3583,6 +3611,31 @@ def resolve_wid(st, wid):
     return wid if wid in st["work"] else None
 
 
+def global_flags(sub, argv):
+    """--session/--agent go anywhere, before the command too, and every command takes them: pass them on
+    to the (sub)command that defines them, drop them where it doesn't (who, audit, lanes...)."""
+    flags, rest, i = [], [], 0
+    while i < len(argv):
+        x = argv[i]
+        if x in ("--session", "--agent") and i + 1 < len(argv):
+            flags += argv[i:i + 2]
+            i += 2
+            continue
+        if x.startswith(("--session=", "--agent=")):
+            flags += x.split("=", 1)
+        else:
+            rest.append(x)
+        i += 1
+    p, acts = None, sub
+    for x in rest:  # descend to the innermost command named (work attach, constitution add...)
+        if acts is None or x not in acts.choices:
+            continue
+        p = acts.choices[x]
+        acts = next((ac for ac in p._actions if isinstance(ac, argparse._SubParsersAction)), None)
+    ok = p._option_string_actions if p else {}
+    return rest + [v for j in range(0, len(flags), 2) if flags[j] in ok for v in flags[j:j + 2]]
+
+
 def main():
     ap = Parser(prog="docket.py", description="docket: session record + work index")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -3655,7 +3708,8 @@ def main():
     rl.add_argument("--agent", default=os.environ.get("DOCKET_AGENT", "main"))
     sub.add_parser("leases", help="who holds which files right now")
     pe = sub.add_parser("pending", help="unfinished tasks left on a work item")
-    pe.add_argument("wid")
+    pe.add_argument("wid", nargs="?", help="defaults to this session's work item")
+    pe.add_argument("--session", **sess)
     pe.add_argument("--all", action="store_true", help="include done/dropped")
     for name, hlp in (("adopt", "take pending tasks into this session"),
                       ("resolve", "mark pending tasks as already done (--reason: the evidence)"),
@@ -3695,7 +3749,8 @@ def main():
     sh.add_argument("--around", nargs="?", const=3, type=int, metavar="N",
                     help="entry: also the N entries before and after it on the same work item")
     ck = sub.add_parser("check", help="re-check a work item's facts and files against the repo")
-    ck.add_argument("wid")
+    ck.add_argument("wid", nargs="?", help="defaults to this session's work item")
+    ck.add_argument("--session", **sess)
     nm = sub.add_parser("name")
     nm.add_argument("name")
     nm.add_argument("--session", **sess)
@@ -3818,7 +3873,7 @@ def main():
     # zsh doesn't word-split an unquoted $S, so S="--session X --agent Y" arrives as one argument
     argv = [x for arg in sys.argv[1:] for x in (arg.split() if arg.startswith("--") and " " in arg
                                                   and re.fullmatch(r"(--[\w-]+ \S+ ?)+", arg) else [arg])]
-    a = ap.parse_args(argv)
+    a = ap.parse_args(global_flags(sub, argv))
 
     if a.cmd == "hook":
         try:
@@ -3915,6 +3970,9 @@ def main():
             print("\nEntries (show <id> for one in full, --around for its timeline):")
             print("\n".join("  " + entry_line(st, e) for e in ents))
         return 0
+    if a.cmd in ("pending", "check") and not a.wid:
+        a.wid = st["sessions"].get(a.session or "", {}).get("work") or sys.exit(
+            "Which work item? Give a W-id (this session isn't filed under one).")
     if a.cmd == "pending":
         wid = resolve_wid(st, a.wid) or sys.exit("No such work item: %s" % a.wid)
         items = [i for i in pending_items(st, wid) if a.all or i["status"] in ("open", "adopted", "active")]
