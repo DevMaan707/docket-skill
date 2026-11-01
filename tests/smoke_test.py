@@ -11,6 +11,7 @@ event log reproduces the same state.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -747,6 +748,27 @@ def main():
         run(["msg", "Gate speed", "One more thing"], d, "sM2")
         out = stopL("sM1")
         check("mail that lands as a turn ends is handed over at Stop", '"block"' in out and "One more thing" in out, out)
+
+        # an ask to two items, dropped once, stays dropped on both; parking sinks stale items
+        _, o1 = run(["work", "new", "Park me", "-k", "parkme", "--top-level"], d, "sP1")
+        p1 = re.findall(r"W-\d+", o1)[0]
+        _, o2 = run(["work", "new", "Park me too", "-k", "parkmetoo", "--parent", p1], d, "sP1")
+        p2 = re.findall(r"W-\d+", o2)[0]
+        _, out = run(["msg", "%s,%s" % (p1, p2), "Please rerun the twin gate", "--kind", "ask"], d, "sM2")
+        apid = "A-" + re.search(r"pending task A-(\w+)", out).group(1)
+        run(["drop", apid, "--reason", "not needed"], d, "sP1")
+        _, au = run(["audit"], d)
+        check("an ask sent to two items, dropped once, is dropped on both", apid not in au, au[-600:])
+        run(["msg", p2, "Second twin ask", "--kind", "ask"], d, "sM2")
+        _, out = run(["work", "park", p1, "--reason", "stale"], d, "sM1")
+        _, au = run(["audit"], d)
+        idx = open(os.path.join(d, ".docket", "work", "INDEX.md"), encoding="utf-8").read().split("## By type")[0]
+        last_root = [l for l in idx.splitlines() if l.startswith("- **")][-1]
+        check("parking takes the item and its sub-items out of the audit and to the bottom of the index",
+              p1 in out and p2 in out and "Second twin ask" not in au and p1 in last_root, out + au[-300:] + last_root)
+        run(["work", "attach", p2], d, "sP1")
+        _, out = run(["work", "list"], d)
+        check("attaching to a parked item brings it back", re.search(p2 + r".*open", out) is not None, out[-400:])
 
         before = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
         run(["rebuild"], d)

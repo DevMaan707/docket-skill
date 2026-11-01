@@ -131,7 +131,7 @@ TYPE_RULES = [  # first match wins; "investigation of a bug" is an investigation
     ("chore", r"upgrade|bump|deps|dependenc|ci\b|config|docs?\b|readme"),
 ]
 TYPE_ORDER = {t: i for i, t in enumerate(WORK_TYPES)}
-STATUS_ORDER = {"open": 0, "done": 1, "superseded": 2, "abandoned": 3}
+STATUS_ORDER = {"open": 0, "done": 1, "superseded": 2, "abandoned": 3, "parked": 4}
 SUSPICIOUS = re.compile(
     r"(ignore (all |any )?(previous|prior|above) (instructions|context)|disregard .{0,20}instructions|"
     r"you are now|new instructions:|system prompt|<\s*/?\s*(system|instructions)\s*>|"
@@ -423,7 +423,14 @@ def pending_items(st, wid):
     """Unfinished work left on a work item, with a status for each:
     open (nobody has it), active (on a live session's task list), adopted, done, dropped."""
     w = st["work"][wid]
-    over = w.get("pending", {})
+    over = dict(w.get("pending", {}))
+    for m in st.get("msgs", []):  # an ask to several items is settled once, on whichever item find_pending hit
+        if m.get("kind") == "ask" and wid in m.get("wids", []):
+            p = "A-" + m["id"][:6]
+            for ow in m["wids"]:
+                o = st["work"].get(ow, {}).get("pending", {}).get(p)
+                if o and (p not in over or o["ts"] > over[p]["ts"]):
+                    over[p] = o
     raw, done_subj = [], set()
     for x in w["sessions"]:
         s = st["sessions"].get(x["sid"])
@@ -767,6 +774,8 @@ def apply(st, ev):
             s["work"] = w["id"]
             if sid not in [x["sid"] for x in w["sessions"]]:
                 w["sessions"].append({"sid": sid, "role": ev.get("role", "continue"), "ts": ts})
+            if w["status"] == "parked":  # someone picked it up again
+                w["status"] = "open"
             w["updated"] = ts
     elif kind == "work_status":
         w = work_item(st, ev["wid"])
@@ -1374,7 +1383,7 @@ def write_index(root, st, wids):
             tree(c["id"], depth + 1)
 
     roots = sorted((r for r in rows if not r["parent"]),
-                   key=lambda r: (not r["live"], STATUS_ORDER.get(r["status"], 9), -r["updated"]))
+                   key=lambda r: (r["status"] == "parked", not r["live"], STATUS_ORDER.get(r["status"], 9), -r["updated"]))
     lines.append("## By area")
     lines.append("")
     for r in roots:
@@ -2986,10 +2995,17 @@ def main():
     wa.add_argument("--session", **sess)
     ws = wsub.add_parser("status")
     ws.add_argument("wid")
-    ws.add_argument("status", choices=["open", "done", "abandoned", "superseded"])
+    ws.add_argument("status", choices=["open", "done", "abandoned", "superseded", "parked"])
     ws.add_argument("--expect", help="rev you last read; refuse if others changed the item since")
     ws.add_argument("--session", **sess)
     wsub.add_parser("list")
+    wp = wsub.add_parser("park", help="sink stale items to the bottom, out of audits and sweeps; attach or status open brings one back")
+    wp.add_argument("wids", nargs="*")
+    wp.add_argument("--idle", type=float, metavar="HOURS",
+                    help="park every open item that, with all its sub-items, saw no activity for HOURS and has nobody live on it")
+    wp.add_argument("--reason", required=True)
+    wp.add_argument("--dry-run", action="store_true")
+    wp.add_argument("--session", **sess)
 
     se = sub.add_parser("search", help="find prior work")
     se.add_argument("query")
@@ -3688,6 +3704,24 @@ def main():
             else:
                 _, st = emit(root, sid=sid, kind="work_rename", wid=wid, title=clip(a.title, 120))
             print("%s: %s [%s]" % (wid, breadcrumb(st, wid), st["work"][wid]["type"]))
+        elif a.wcmd == "park":
+            if a.idle:
+                cut = now() - a.idle * 3600
+                quiet = lambda x: st["work"][x]["updated"] < cut and not live_sessions(st, x)
+                pick = [w for w in st["work"] if st["work"][w]["status"] == "open" and quiet(w)
+                        and all(quiet(d) or st["work"][d]["status"] != "open" for d in descendants(st, w))]
+            else:
+                pick = []
+                for x in a.wids:  # an item parks with its open sub-items, so none keep nagging
+                    wid = resolve_wid(st, x) or sys.exit("No such work item: %s" % x)
+                    pick += [wid] + [d for d in descendants(st, wid) if st["work"][d]["status"] == "open"]
+            pick = list(dict.fromkeys(w for w in pick if st["work"][w]["status"] != "parked"))
+            for wid in pick:
+                print("%s %s  %s" % ("would park" if a.dry_run else "parked", wid, st["work"][wid]["title"]))
+                if not a.dry_run:
+                    _, st = emit(root, sid=sid, kind="work_status", wid=wid, title="parked")
+                    emit(root, sid=sid, kind="note", wid=wid, title="Parked: " + clip(a.reason, 200))
+            print("%d item(s)%s. Bring one back with: work status <id> open" % (len(pick), "" if pick else " to park"))
         elif a.wcmd == "status":
             wid = resolve_wid(st, a.wid) or sys.exit("No such work item: %s" % a.wid)
             _, st = emit(root, _guard=expect_guard(wid, a.expect, sid), sid=sid, kind="work_status", wid=wid, title=a.status)

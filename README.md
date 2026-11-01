@@ -177,7 +177,9 @@ goal, plus working rules:
 The goal must come from a prompt the user actually typed. Sessions holding a lane are kept working by the Stop hook until the goal is
 met or they log a real blocker (capped at 10 turns in a row). `audit` lists tasks nobody owns,
 stale ones, ones marked done without evidence, and items whose tasks are all finished; `reopen`
-puts back a task that was marked done but isn't.
+puts back a task that was marked done but isn't. `work park <ids> --reason` (or `--idle <hours>`)
+sinks stale items and their sub-items to the bottom of the index and out of the audit, still readable;
+attaching to one brings it back.
 
 ## Surviving /clear
 

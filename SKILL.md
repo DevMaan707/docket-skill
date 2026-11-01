@@ -50,6 +50,11 @@ not a soloist:
   When the Stop hook hands you your share, settle each before you go idle: resolve it with evidence,
   adopt it, drop it with a reason, or message whoever owns it. Tasks a commit already seems to cover
   are marked `DONE?`. Check them, and resolve them with that commit as evidence.
+- **Park what's stale instead of hiding it.** `work park W-xxxx --reason "..."` (or
+  `work park --idle 36 --reason "..." --dry-run` to pick every item quiet for 36 h) sets the item and
+  its open sub-items to `parked`: they sink to the bottom of the index and leave the audit and sweep,
+  but stay readable. Attaching to one, or `work status W-xxxx open`, brings it back. Don't build
+  "PARKED" parent items by hand.
 - **Close the loop.** Report results to whoever is waiting on them. Resolve or drop the tasks you
   own, so nothing goes stale.
 

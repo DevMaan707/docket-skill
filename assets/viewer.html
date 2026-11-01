@@ -511,7 +511,7 @@ function rail(route){
   sessions().forEach(function(s){
     h+='<a class="rlink'+(route.v==="s"&&route.id===s.id?" sel":"")+'" href="#/s/'+encodeURIComponent(s.id)+'"><div class="t">'+esc(sname(s))+'</div><div class="m">'+statusHtml(s)+'<span>'+ago(s.last)+'</span></div></a>';
   });
-  var tops=Object.values(B.work||{}).filter(function(w){return !w.parent;}).sort(function(a,b){return (a.status!=="open")-(b.status!=="open")||b.updated-a.updated;});
+  var tops=Object.values(B.work||{}).filter(function(w){return !w.parent;}).sort(function(a,b){return srank(a)-srank(b)||b.updated-a.updated;});
   if(tops.length){
     h+='<h4>Work</h4>';
     tops.slice(0,12).forEach(function(w){
@@ -525,7 +525,8 @@ function rail(route){
     Object.values(B.work||{}).map(function(w){return '<option value="#/w/'+w.id+'"'+(route.v==="w"&&route.id===w.id?" selected":"")+'>'+w.id+' '+esc(workPath(w.id))+'</option>';}).join("");
   document.getElementById("msel").innerHTML=ms;
 }
-function kids(wid){ return Object.values(B.work||{}).filter(function(w){return w.parent===wid;}).sort(function(a,b){return (a.status!=="open")-(b.status!=="open")||b.updated-a.updated;}); }
+function srank(w){ return w.status==="open"?0:w.status==="parked"?2:1; }
+function kids(wid){ return Object.values(B.work||{}).filter(function(w){return w.parent===wid;}).sort(function(a,b){return srank(a)-srank(b)||b.updated-a.updated;}); }
 
 /* ---------- overview ---------- */
 function overview(){
@@ -584,14 +585,14 @@ function indexSection(){
   if(!all.length) return "";
   var h='<section class="index"><div class="secthead"><span class="label">The index</span><span class="n">· '+all.length+' work item'+(all.length>1?"s":"")+'</span><span class="toggle"><button type="button" data-idx="area" class="'+(idxMode==="area"?"on":"")+'">By area</button><button type="button" data-idx="type" class="'+(idxMode==="type"?"on":"")+'">By type</button></span></div>';
   if(idxMode==="area"){
-    var tops=all.filter(function(w){return !w.parent || !B.work[w.parent];}).sort(function(a,b){return (a.status!=="open")-(b.status!=="open")||b.updated-a.updated;});
+    var tops=all.filter(function(w){return !w.parent || !B.work[w.parent];}).sort(function(a,b){return srank(a)-srank(b)||b.updated-a.updated;});
     (function walk(ws,depth){ ws.forEach(function(w){ h+=wrow(w,depth); walk(kids(w.id),depth+1); }); })(tops,0);
   } else {
     ["theme","feature","optimization","improvement","bug","investigation","refactor","research","chore"].forEach(function(t){
       var of=all.filter(function(w){return (w.type||"feature")===t;});
       if(!of.length) return;
       h+='<div class="typegroup"><span class="label">'+t+' · '+of.length+'</span>';
-      of.sort(function(a,b){return (a.status!=="open")-(b.status!=="open")||b.updated-a.updated;}).forEach(function(w){
+      of.sort(function(a,b){return srank(a)-srank(b)||b.updated-a.updated;}).forEach(function(w){
         var w2=Object.assign({},w,{title:workPath(w.id)}); h+=wrow(w2,0); });
       h+='</div>';
     });
