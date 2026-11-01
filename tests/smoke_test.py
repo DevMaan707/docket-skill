@@ -259,7 +259,8 @@ def main():
         code, out = run(["claim", "src/auth.py"], d, "sG")
         check("claiming a held file is refused", code == 3 and "held:" in out, out)
         code, out = run(["claim", "src/x.py", "--session sG --agent main"], d, "sG")
-        check("an unsplit flag string is not claimed as a path", code != 0 and "Not a path" in out, out)
+        check("flags glued into one argument (zsh's unsplit $S) are split, not claimed as a path",
+              code == 0 and "claimed src/x.py for" in out and "--session" not in out, out)
         code, out = run(["claim", "src/", "--steal"], d, "sG")
         check("steal needs a reason", code != 0, out)
         code, out = run(["claim", "src/", "--steal", "--reason", "sB is stuck"], d, "sG")

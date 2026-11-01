@@ -3121,7 +3121,10 @@ def main():
     sy.add_argument("--quiet", action="store_true")
     for c in ("init", "open", "rebuild", "path"):
         sub.add_parser(c)
-    a = ap.parse_args()
+    # zsh doesn't word-split an unquoted $S, so S="--session X --agent Y" arrives as one argument
+    argv = [x for arg in sys.argv[1:] for x in (arg.split() if arg.startswith("--") and " " in arg
+                                                  and re.fullmatch(r"(--[\w-]+ \S+ ?)+", arg) else [arg])]
+    a = ap.parse_args(argv)
 
     if a.cmd == "hook":
         try:
