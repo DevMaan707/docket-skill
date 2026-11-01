@@ -15,7 +15,7 @@ that's the first thing to find out, or to ask the user (see the clarify rule in 
    deferred without blocking it. More than ~8 files or 2 new modules: challenge whether fewer
    moving parts do the same.
 5. **Reuse map.** Map each sub-problem to code that already exists (this repo, stdlib, installed
-   dependencies) and to prior work on the docket (`$B search`, dead ends, refuted hypotheses). For
+   dependencies) and to prior work on the docket (`docket search`, dead ends, refuted hypotheses). For
    anything you rebuild, say why extending the existing path is worse.
 6. **Alternatives.** At least: A) the requested plan, B) the smallest scoped alternative, C) a
    larger approach only with evidence it pays off. Log the pick as a `decision` with the others
@@ -28,5 +28,5 @@ that's the first thing to find out, or to ask the user (see the clarify rule in 
 
 Every scope change needs the user's approval. Accepted additions go into the plan; deferred ones
 become pending tasks on the work item (or a new work item), not a separate TODO file. Rejected ones
-go under "Not in scope" in the plan. If the project has a constitution (`$B constitution`), check
+go under "Not in scope" in the plan. If the project has a constitution (`docket constitution`), check
 the plan against it and cite the principles it touches (C-1, C-2, ...).

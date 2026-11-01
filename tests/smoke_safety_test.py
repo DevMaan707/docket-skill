@@ -125,6 +125,50 @@ def _main(d):
     finally:
         os.environ.pop("DOCKET_ROOT") if old is None else os.environ.__setitem__("DOCKET_ROOT", old)
 
+    # upkeep nobody owns: old pins, settled notes to the user, idle items, lagging briefs -> tidy list, steward duty
+    run(["post", "Proof contracts v2", "--pin"], d, session="sS")
+    run(["msg", "user", "W-0001 needs your A/B/C"], d, session="sS")
+    run(["work", "new", "Old idle thing", "-k", "idle"], d, session="sT")
+    st = docket.load_state(d)
+    day = docket.now() - 2 * 86400
+    for m in st["msgs"]:
+        m["ts"] = day
+    for w in st["work"].values():
+        w["updated"] = day
+    rows = docket.tidy_list(st)
+    kinds = {r.split()[0] for r in rows}
+    check("tidy lists old pins, needs and idle items", {"pin", "needs", "item"} <= kinds, "\n".join(rows))
+    note = next(m for m in st["msgs"] if "user" in m["to"])
+    code, out = run(["withdraw", note["id"], "--reason", "decided in 3b74312f43"], d, session="sS")
+    check("withdraw takes a settled note off the needs list",
+          code == 0 and not any(n["id"] == note["id"] for n in docket.needs_user(docket.load_state(d))), out)
+    code, out = run(["withdraw", "nosuchid", "--reason", "x"], d, session="sS")
+    check("withdraw names ids it can't find", "no message" in out, out)
+    st = docket.load_state(d)
+    for m in st["msgs"]:
+        m["ts"] = day
+    for w in st["work"].values():
+        w["updated"] = day
+    for k in ("sS", "sT"):
+        st["sessions"][k].update(sock="/nonexistent/sock", host=docket.socket.gethostname(), pid=os.getpid(), status="idle")
+    first = docket.steward(d, st)
+    check("steward hands tidy duty to one live session", first in ("sS", "sT"))
+    st2 = docket.load_state(d)
+    duty = [m for m in st2["msgs"] if m["sid"] == "steward"]
+    check("tidy duty is a tracked ask listing the stale things", len(duty) == 1 and duty[0]["kind"] == "ask"
+          and "Old idle thing" in duty[0]["body"] and "pin " in duty[0]["body"], duty and duty[0]["body"][-600:])
+    check("the steward is not a session", "steward" not in [x["id"] for x in docket.free_identities(st2, "sS")]
+          if hasattr(docket, "free_identities") else True)
+    check("steward waits its turn", docket.steward(d, st) is None)
+    os.utime(os.path.join(bd, "steward"), (0, 0))
+    for k in ("sS", "sT"):
+        st2["sessions"][k].update(sock="/nonexistent/sock", host=docket.socket.gethostname(), pid=os.getpid(), status="idle")
+    for m in st2["msgs"]:
+        m["ts"] = day
+    for w in st2["work"].values():
+        w["updated"] = day
+    check("tidy duty rotates to the other session", docket.steward(d, st2) not in (first, None))
+
 
 if __name__ == "__main__":
     sys.exit(main())

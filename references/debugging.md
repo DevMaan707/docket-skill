@@ -6,7 +6,7 @@
 Use this for every bug, test failure, build break, performance problem or surprise, and most of
 all when you are in a hurry or "one quick fix" looks obvious.
 
-Before you start, check what other sessions already ruled out: `$B show W-xxxx` lists the item's
+Before you start, check what other sessions already ruled out: `docket show W-xxxx` lists the item's
 **Hypotheses** (refuted ones struck through) and **Dead ends**. Don't re-test a refuted cause
 without new evidence.
 
@@ -15,8 +15,8 @@ without new evidence.
 1. **Read the error completely.** The full stack trace, line numbers, codes, warnings.
 2. **Reproduce it reliably.** Exact steps. Not reproducible: gather more data, don't guess.
 3. **Check what changed.** `git log`, `git diff`, new dependencies, config, environment. Also the
-   docket: another session's recent change (`$B search`, the board) may be the cause; if so,
-   message its owner (`$B msg --about "<topic>" --kind finding|ask`) instead of fixing their files.
+   docket: another session's recent change (`docket search`, the board) may be the cause; if so,
+   message its owner (`docket msg --about "<topic>" --kind finding|ask`) instead of fixing their files.
 4. **Multi-component systems:** instrument each boundary (what enters, what leaves, which env and
    config arrive), run once, and let the evidence say *which* layer breaks before you dig into it.
 5. **Trace the data backwards.** Where does the bad value come from? Who called this with it? Keep
@@ -33,14 +33,14 @@ without new evidence.
 
 1. **One hypothesis at a time,** stated as "X is the root cause because Y". Log it before you test
    it, so other sessions see it:
-   `$B log hypothesis "X causes Y" --work W-xxxx -b "why I think so"`
+   `docket log hypothesis "X causes Y" --work W-xxxx -b "why I think so"`
 2. **Test it with the smallest possible change.** One variable at a time.
 3. **Record the verdict with evidence,** confirmed or refuted:
-   `$B log hypothesis "X causes Y" --supersedes <id> --refuted --evidence "<command and result>"`
+   `docket log hypothesis "X causes Y" --supersedes <id> --refuted --evidence "<command and result>"`
    A refuted hypothesis is as valuable as a confirmed one: it stops the next session from
    spending an hour on the same idea.
 4. Refuted: form a **new** hypothesis. Don't pile more changes on top.
-5. Don't know? Say "I don't understand X". Research, or ask (`$B msg user "..." --kind ask`).
+5. Don't know? Say "I don't understand X". Research, or ask (`docket msg user "..." --kind ask`).
 
 ## Phase 4: Implementation
 

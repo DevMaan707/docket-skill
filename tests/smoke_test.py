@@ -690,7 +690,7 @@ def main():
             hook(d, "PostToolUse", k, tool_name="Bash", tool_input={"command": "ls"})
         outs = [run(["hook"], d, stdin=json.dumps(dict(hook_event_name="Stop", session_id=k, cwd=d)),
                     extra_env=dict(DOCKET_LISTEN="on"))[1] for k in live]
-        hit = [o for o in outs if "settle these stale" in o and "streaming writer" in o]
+        hit = [o for o in outs if "ettle these stale" in o and "streaming writer" in o]
         check("a forgotten task is assigned to exactly one live session, which must settle it", len(hit) == 1,
               "\n".join(o[:200] for o in outs))
         from importlib import util as iu2

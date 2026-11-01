@@ -5,7 +5,7 @@
 Review the diff against its base (`git diff <base>...`), plus uncommitted files. Cite `file:line`
 for every finding and suggest the fix. Flag only real problems. Be terse: one line for the
 problem, one for the fix; no preamble, no "looks good overall". Record the result on the docket:
-`$B log review "<verdict>" --verdict sound|partial|wrong -b "<findings>"`, superseding any entry
+`docket log review "<verdict>" --verdict sound|partial|wrong -b "<findings>"`, superseding any entry
 the review proved false.
 
 ## Two passes
@@ -59,7 +59,7 @@ Mechanical fixes a senior engineer would apply without discussion (dead code, st
 magic numbers, path mismatches, unused variables): fix them, if you hold the file's lease. Anything
 reasonable engineers could disagree on (security, races, design, removing behaviour, fixes over
 ~20 lines, user-visible changes, gates): ask, batched into one question with a recommended option
-(`$B msg <owner or user> "..." --kind ask`). In another session's files, send the finding to its
+(`docket msg <owner or user> "..." --kind ask`). In another session's files, send the finding to its
 owner instead of editing.
 
 ## Verify claims

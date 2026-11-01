@@ -507,7 +507,7 @@ def pending_items(st, wid):
         passes = [x for p in [it["pid"]] + [c["pid"] for c in it["copies"]] for x in w.get("passes", {}).get(p, [])]
         it["passedBy"] = sorted({x["sid"] for x in passes})
         if it["status"] == "open" and passes and it["source"] != "criterion":
-            live = {x["id"] for x in st["sessions"].values() if is_live(x) and x["id"] not in ("user", "manual")}
+            live = {x["id"] for x in st["sessions"].values() if is_live(x) and x["id"] not in ("user", "manual", "steward")}
             if len(it["passedBy"]) >= PASSES_TO_DROP or (live and live <= set(it["passedBy"])):
                 it.update(status="dropped", by=None, reason="no session took it up: " + "; ".join(
                     "%s: %s" % (sname(st, x["sid"]), x["reason"]) for x in passes))
@@ -708,6 +708,8 @@ def apply(st, ev):
         s["cwd"] = ev["cwd"]
     if sid == "user" and not s["name"]:
         s["name"] = "You (from a terminal)"
+    if sid == "steward" and not s["name"]:
+        s["name"] = "Docket steward"
     if ev.get("sock"):
         s["sock"] = ev["sock"]  # Claude Code's inbox socket: docket wakes the session through it
     if kind == "session_start":
@@ -911,6 +913,10 @@ def apply(st, ev):
             body=body, re=ev.get("re"), pin=bool(ev.get("pin")), wid=s.get("work"), readBy=[],
             kind=ev.get("msgKind") or "fyi", files=ev.get("files") or [], wids=ev.get("wids") or [], due=ev.get("due")))
         st["msgs"] = st["msgs"][-MAX_MSGS:]
+        if sid == "steward":  # tidy duty rotates: whoever had it last goes to the back
+            for t in ev.get("to") or []:
+                if t in st["sessions"]:
+                    st["sessions"][t]["stewardTs"] = ts
         for t in ev.get("wids") or []:  # an ask is a pending task on these items
             if t in st["work"]:
                 st["work"][t]["updated"] = ts
@@ -933,6 +939,10 @@ def apply(st, ev):
         for m in st.get("msgs", []):
             if m["id"] == ev.get("ref"):
                 m["pin"] = False
+    elif kind == "withdraw":  # a note to the user that's already settled: off the needs list, kept in history
+        for m in st.get("msgs", []):
+            if m["id"] == ev.get("ref"):
+                m["withdrawn"] = ev.get("body") or True
 
     if kind in ENTRY_KINDS and kind not in ("task", "unblock"):
         e = {"id": ev["id"], "ts": ts, "kind": "summary" if kind == "done" else kind,
@@ -2075,8 +2085,10 @@ def handle_hook(inp):
                 tok = None
             if tok:
                 emit(root, kind="metric", title="tokens", vals=tok, **E)
-        why =keep_going(load_state(root), sid) if who == "main" else None
+        why = keep_going(load_state(root), sid) if who == "main" else None
         if why:
+            up = None if inp.get("stop_hook_active") else upkeep(root, sid, load_state(root))
+            why = "First, upkeep (other sessions plan from it): %s\n\nThen: %s" % (up, why) if up else why
             emit(root, kind="goal_continue", title="Kept going: standing goal is open", **E)
             print(json.dumps({"decision": "block", "reason": why}))
             return
@@ -2084,24 +2096,8 @@ def handle_hook(inp):
             st = load_state(root)
             start_rouser(root, st)
             late = deliver(root, sid, st)  # arrived while this turn was finishing
-            due = [m for m in open_asks(st, sid) if now() > ask_due(m)]
-            mine = duties(st, sid) if not late and not st.get("paused") and os.environ.get("DOCKET_SWEEP") != "off" else []
-            if mine and now() - st["sessions"].get(sid, {}).get("sweepTs", 0) > 3600:
-                emit(root, kind="sweep", title="Asked to settle %d stale tasks" % len(mine), **E)
-                late = ("Before you go idle, settle these stale or unowned tasks; they're assigned to you so nothing is "
-                        "forgotten (one hour until the next check):\n%s\nFor each, check the code and git log, then: done -> "
-                        "%s resolve <id> --reason \"<evidence>\"; yours to do -> adopt <id>; no longer needed -> drop <id> "
-                        "--reason; a day old (REVIEW) and not worth doing -> pass <id> --reason \"<why>\" (removed once %d sessions pass); "
-                        "another session's -> msg it; an item with nothing left -> work status W-xxxx done."
-                        % ("\n".join("- %s %s %s: %s" % r for r in mine[:6]), cli(), PASSES_TO_DROP))
-            if not late and due:
-                late = ("Asks to you are past their deadline with no reply:\n%s\nAnswer each (%s reply <id> \"...\"), even "
-                        "if only to say you can't or when you will, then stop." % ("\n".join(
-                            "- [%s] from %s, %s: %s" % (m["id"], who_label(st, m), ago(m["ts"]), clip(m["title"], 120))
-                            for m in due[:8]), cli()))
             if not late:
-                tidy = tidy_nudge(root, sid, st)
-                late = tidy and tidy.replace("<docket>", "Before you go idle: ").replace("</docket>", "")
+                late = upkeep(root, sid, st)
             if not late and others_live(st, sid) and not os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") \
                     and not st["sessions"].get(sid, {}).get("sock") and not listening(root, sid):
                 late = ("Other sessions are live here and may message you while you're idle. Before you stop, "
@@ -2291,7 +2287,7 @@ def task_owner(st, wid, pid):
     item, else a live session picked by a stable hash so the load spreads and nothing is skipped."""
     passed = {x["sid"] for x in st["work"].get(wid, {}).get("passes", {}).get(pid, [])}  # ask someone new
     live = sorted(x["id"] for x in st["sessions"].values()
-                  if is_live(x) and x["id"] not in ("user", "manual") and x["id"] not in passed)
+                  if is_live(x) and x["id"] not in ("user", "manual", "steward") and x["id"] not in passed)
     if not live:
         return None
     if pid.startswith("A-"):
@@ -2490,7 +2486,7 @@ def rouse_idle(root, st, sent):
         return []
     out, c = [], cli()
     for x in st["sessions"].values():
-        if x["id"] in ("user", "manual") or x["status"] == "ended" or x.get("next") or not x.get("sock") \
+        if x["id"] in ("user", "manual", "steward") or x["status"] == "ended" or x.get("next") or not x.get("sock") \
                 or x.get("host") != socket.gethostname() or process_gone(x):
             continue
         if now() - x["last"] < IDLE_WAKE_SECS or now() - sent.get(x["id"], 0) < REWAKE_SECS \
@@ -2511,6 +2507,73 @@ def rouse_idle(root, st, sent):
             sent[x["id"]] = now()
             out.append(x["id"])
     return out
+
+
+TIDY_AGE = 24 * 3600
+STEWARD_SECS = _envnum("DOCKET_STEWARD_HOURS", 3) * 3600
+
+
+def tidy_list(st):
+    """The shared record's upkeep nobody owns: pins and notes to the user that may be settled, open items nobody
+    touches, briefs that lag their session's work. One line each, at most 10 of a kind (oldest first)."""
+    t, pins, needs, items, briefs = now(), [], [], [], []
+    for m in st.get("msgs", []):
+        if m.get("pin") and "board" in m["to"] and t - m["ts"] > TIDY_AGE:
+            pins.append("pin    %s  %s: %s" % (m["id"], ago(m["ts"]), clip(m["title"], 90)))
+    for n in needs_user(st):
+        if t - n["ts"] > TIDY_AGE and not n["what"].startswith("Blocker"):
+            needs.append("needs  %s  %s: %s" % (n["id"], ago(n["ts"]), clip(n["title"], 90)))
+    for w in sorted(st["work"].values(), key=lambda w: w.get("updated", 0)):
+        if w["status"] == "open" and not w.get("detached") and t - w.get("updated", 0) > TIDY_AGE:
+            items.append("item   %s  untouched since %s: %s" % (w["id"], ago(w.get("updated", 0)), clip(w["title"], 80)))
+    for x in st["sessions"].values():
+        b = x.get("brief") if isinstance(x.get("brief"), dict) else {}
+        if x["status"] != "ended" and not x.get("next") and t - x.get("last", 0) < 3600 and x.get("work") \
+                and x.get("progressTs", 0) - b.get("ts", x.get("started", 0)) > 3600:
+            briefs.append("brief  %s  %s: %s behind its work" % (x["id"][:8], sname(st, x["id"]),
+                                                               "missing" if not b else "%d min" % ((x["progressTs"] - b["ts"]) // 60)))
+    out = []
+    for rows in (pins, needs, items, briefs):
+        out += rows[:10] + (["       (+%d more: %s tidy)" % (len(rows) - 10, cli())] if len(rows) > 10 else [])
+    return out
+
+
+def tidy_how():
+    c = cli()
+    return ("pin   superseded, done or old news -> %s unpin <id> [<id>...]\n"
+            "needs already settled by a decision, reply or commit -> %s withdraw <id> --reason \"<what settled it>\" "
+            "(never one the user still has to answer)\n"
+            "item  finished -> %s work status <W> done; on hold -> work park <W> --reason; someone's -> msg them\n"
+            "brief lagging -> %s msg <session> \"your brief is stale: rewrite it\"" % (c, c, c, c))
+
+
+def steward(root, st):
+    """Every few hours, hand the upkeep nobody owns to one live session (rotating) as a tracked ask, so pins,
+    needs and idle items get cleared by an agent instead of piling up. Returns the session picked, or None."""
+    f = os.path.join(bdir(root), "steward")
+    try:
+        if now() - os.path.getmtime(f) < STEWARD_SECS:
+            return None
+    except OSError:
+        pass
+    rows = tidy_list(st)
+    if len(rows) < 3:  # a couple of stale lines can wait for the next round
+        return None
+    live = [x for x in st["sessions"].values() if x["id"] not in ("user", "manual", "steward") and x["status"] != "ended"
+            and not x.get("next") and x.get("sock") and x.get("host") == socket.gethostname() and not process_gone(x)
+            and now() - x.get("last", 0) < 3600]
+    if not live:
+        return None
+    x = min(live, key=lambda x: (x.get("stewardTs", 0), -x.get("last", 0)))
+    ev, st = emit(root, sid="steward", kind="msg", to=[x["id"]], msgKind="ask", wids=[x["work"]] if x.get("work") else [],
+                  due=now() + 3600, title="Tidy duty (your turn): %d stale things in the shared record" % len(rows),
+                  body="Nobody owns these, so they rotate; this round is yours. Check each against the board, the "
+                       "decisions and git, settle what's settled, leave what's still live, then reply with what you did "
+                       "(%s reply <id> \"...\"). Never withdraw a question the user hasn't been answered on.\n\n%s"
+                       % (cli(), "\n".join(rows)) + "\n\nHow:\n" + tidy_how())
+    wake(st, ev)
+    open(f, "w").close()
+    return x["id"]
 
 
 def start_rouser(root, st):
@@ -2876,6 +2939,28 @@ def stale_brief(st, sid):
 TIDY_SECS = 1800
 
 
+def upkeep(root, sid, st):
+    """What a session owes the shared record before it idles or carries on: stale tasks assigned to it (hourly),
+    asks past their deadline, a brief that lags its work (every TIDY_SECS). None when nothing is due."""
+    mine = duties(st, sid) if not st.get("paused") and os.environ.get("DOCKET_SWEEP") != "off" else []
+    if mine and now() - st["sessions"].get(sid, {}).get("sweepTs", 0) > 3600:
+        emit(root, sid=sid, kind="sweep", title="Asked to settle %d stale tasks" % len(mine))
+        return ("Settle these stale or unowned tasks; they're assigned to you so nothing is "
+                "forgotten (one hour until the next check):\n%s\nFor each, check the code and git log, then: done -> "
+                "%s resolve <id> --reason \"<evidence>\"; yours to do -> adopt <id>; no longer needed -> drop <id> "
+                "--reason; a day old (REVIEW) and not worth doing -> pass <id> --reason \"<why>\" (removed once %d sessions pass); "
+                "another session's -> msg it; an item with nothing left -> work status W-xxxx done."
+                % ("\n".join("- %s %s %s: %s" % r for r in mine[:6]), cli(), PASSES_TO_DROP))
+    due = [m for m in open_asks(st, sid) if now() > ask_due(m)]
+    if due:
+        return ("Asks to you are past their deadline with no reply:\n%s\nAnswer each (%s reply <id> \"...\"), even "
+                "if only to say you can't or when you will." % ("\n".join(
+                    "- [%s] from %s, %s: %s" % (m["id"], who_label(st, m), ago(m["ts"]), clip(m["title"], 120))
+                    for m in due[:8]), cli()))
+    tidy = tidy_nudge(root, sid, st)
+    return tidy and tidy.replace("<docket>", "").replace("</docket>", "")
+
+
 def tidy_nudge(root, sid, st=None):
     """The brief/filing nudge for sessions that run without prompts: at most once per TIDY_SECS,
     checked with one stat so PostToolUse stays cheap."""
@@ -3091,7 +3176,7 @@ def needs_user(st):
     out = []
     msgs = st.get("msgs", [])
     for m in msgs:
-        if "user" in m["to"] and not any(r["re"] == m["id"] and r["sid"] == "user" for r in msgs):
+        if "user" in m["to"] and not m.get("withdrawn") and not any(r["re"] == m["id"] and r["sid"] == "user" for r in msgs):
             out.append({"id": m["id"], "what": "%s from %s" % ("Question" if m.get("kind") == "ask" else "Note",
                                                                   sname(st, m["sid"])), "title": m["title"], "ts": m["ts"]})
     for x in st["sessions"].values():
@@ -3119,7 +3204,7 @@ def away_digest(st, since, sid=None):
     """What happened since a time, per session, for a user coming back."""
     out = []
     for x in sorted(st["sessions"].values(), key=lambda x: -x["last"]):
-        if x["id"] in ("user", "manual") or x["last"] < since or (sid and x["id"] in selves(st, sid)):
+        if x["id"] in ("user", "manual", "steward") or x["last"] < since or (sid and x["id"] in selves(st, sid)):
             continue
         b = x.get("brief") if isinstance(x.get("brief"), dict) else {}
         n = sum(1 for e in x.get("entries", []) if e.get("ts", 0) >= since)
@@ -3345,7 +3430,7 @@ def free_identities(st, sid):
     """Closed sessions (ended, or their Claude process is gone) whose identity nobody took over yet."""
     out = []
     for x in st["sessions"].values():
-        if x["id"] in (sid, "user", "manual") or x.get("next") or now() - x["last"] > 7 * 86400:
+        if x["id"] in (sid, "user", "manual", "steward") or x.get("next") or now() - x["last"] > 7 * 86400:
             continue
         lanes = [l["name"] for l in st.get("lanes", {}).values() if l["sid"] == x["id"]]
         if (x.get("name") or x.get("work") or lanes) and (x["status"] == "ended" or process_gone(x)):
@@ -3783,9 +3868,14 @@ def main():
     ib.add_argument("--session", **sess)
     bd = sub.add_parser("board", help="the project board: pinned notices and recent posts")
     bd.add_argument("-n", type=int, default=20)
-    up = sub.add_parser("unpin")
-    up.add_argument("ref")
+    up = sub.add_parser("unpin", help="take notices off the board's pinned list (superseded or done)")
+    up.add_argument("ref", nargs="+")
     up.add_argument("--session", **sess)
+    wd = sub.add_parser("withdraw", help="take notes to the user that are already settled off the needs list")
+    wd.add_argument("ref", nargs="+")
+    wd.add_argument("--reason", required=True, help="what settled it (a decision id, commit, or reply)")
+    wd.add_argument("--session", **sess)
+    sub.add_parser("tidy", help="what nobody owns and has gone stale: old pins, settled needs, idle items, lagging briefs")
     sub.add_parser("who", help="live sessions you can message")
     ln = sub.add_parser("lane", help="take or drop your part of the goal")
     ln.add_argument("action", choices=["take", "drop"])
@@ -4230,10 +4320,22 @@ def main():
         print("goal %s" % ("claimed met; every session and the board are told, for the user to confirm"
                            if a.action == "met" else "cleared; every session is told"))
         return 0
-    if a.cmd == "unpin":
-        m = find_msg(st, a.ref) or sys.exit("No message with id %s." % a.ref)
-        emit(root, sid=sid, kind="unpin", ref=m["id"], title="Unpinned " + m["id"])
-        print("unpinned " + m["id"])
+    if a.cmd in ("unpin", "withdraw"):
+        for r in a.ref:
+            m = find_msg(st, r)
+            if not m:
+                print("%s: no message with that id" % r)
+                continue
+            if a.cmd == "withdraw" and "user" not in m["to"]:
+                print("%s: not a note to the user" % r)
+                continue
+            _, st = emit(root, sid=sid, kind=a.cmd, ref=m["id"], body=getattr(a, "reason", None),
+                         title="%s %s" % ("Unpinned" if a.cmd == "unpin" else "Withdrew from the needs list", m["id"]))
+            print("%s %s" % ("unpinned" if a.cmd == "unpin" else "withdrew", m["id"]))
+        return 0
+    if a.cmd == "tidy":
+        rows = tidy_list(st)
+        print("\n".join(rows) + "\n\nHow:\n" + tidy_how() if rows else "Nothing stale: pins, needs, items and briefs are current.")
         return 0
     if a.cmd == "lock":
         key = _norm(a.name) or a.name.lower()
@@ -4361,6 +4463,7 @@ def main():
             elif now() - quiet > 3600:
                 return 0
             rouse_idle(root, st, sent)
+            steward(root, st)
     if a.cmd == "assume":
         cands = [x for x, _ in free_identities(st, sid)]
         q = a.who.lower()
@@ -4374,7 +4477,7 @@ def main():
         print(resume_block(st, sid, o).replace("<docket-resume>", "").replace("</docket-resume>", ""))
         return 0
     if a.cmd == "relaunch":
-        rows = [x for x in st["sessions"].values() if x["id"] not in ("user", "manual") and not x.get("next")
+        rows = [x for x in st["sessions"].values() if x["id"] not in ("user", "manual", "steward") and not x.get("next")
                 and now() - x["last"] < 3 * 86400 and re.fullmatch(r"[0-9a-f-]{36}", x["id"])]
         for x in sorted(rows, key=lambda x: -x["last"]):
             print("# %s%s, last active %s" % (x["name"] or x["id"][:8], " (%s)" % x["work"] if x.get("work") else "", ago(x["last"])))

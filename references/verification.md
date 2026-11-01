@@ -13,8 +13,8 @@ passes. This covers every "done", "fixed", "passing", a `summary`, a `fact`, `re
 3. **Read** the whole output: exit code, failure count.
 4. **Does it confirm the claim?** No: state the real status with the evidence. Yes: state the
    claim *with* the evidence.
-5. Only then claim it, and record it: `$B log fact "<claim>" --evidence "<command: result>"`,
-   `$B resolve <id> --reason "<commit, test or gate result>"`.
+5. Only then claim it, and record it: `docket log fact "<claim>" --evidence "<command: result>"`,
+   `docket resolve <id> --reason "<commit, test or gate result>"`.
 
 ## Claim → evidence
 
