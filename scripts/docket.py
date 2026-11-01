@@ -983,6 +983,8 @@ def apply(st, ev):
             a["status"] = "running"
             a["desc"] = a["brief"] = ev.get("desc") or a["desc"]
             a["prompt"] = ev.get("prompt") or a.get("prompt", "")
+    elif kind == "worktree":
+        st.setdefault("worktrees", {})[ev["path"]] = sid
     elif kind == "agent_stop":
         drop_leases(st, lambda l, k: (l["sid"], l["agent"]) == (sid, who))
         if a:
@@ -2149,6 +2151,12 @@ def handle_hook(inp):
             emit(root, kind="task", title="Task %s → %s" % (ti.get("taskId"), ti.get("status") or "updated"),
                  taskId=str(ti.get("taskId")), subject=ti.get("subject"),
                  status=None if ti.get("status") == "deleted" else ti.get("status"), **E)
+        elif tool == "Bash":
+            cmd = ti.get("command") or ""
+            if re.search(r"\bgit\b[^\n;&|]*\bworktree\s+add\b", cmd):
+                note_worktree_add(root, sid, who, cmd, inp.get("cwd"))
+            if re.search(r"\bgit\b[^\n;&|]*\bpush\b", cmd):
+                note_push(root, sid, who, inp.get("tool_response"), inp.get("cwd"))
         elif tool == "ExitPlanMode":
             plan = ti.get("plan") or ""
             first = next((l.strip("# ").strip() for l in plan.splitlines() if l.strip()), "Plan")
@@ -3164,8 +3172,13 @@ def upkeep(root, sid, st):
                 "if only to say you can't or when you will." % ("\n".join(
                     "- [%s] from %s, %s: %s" % (m["id"], who_label(st, m), ago(m["ts"]), clip(m["title"], 120))
                     for m in due[:8]), cli()))
+    try:
+        wt = worktree_nudge(root, sid, st)
+    except (OSError, subprocess.SubprocessError):
+        wt = None
     tidy = tidy_nudge(root, sid, st)
-    return tidy and tidy.replace("<docket>", "").replace("</docket>", "")
+    tidy = tidy and tidy.replace("<docket>", "").replace("</docket>", "")
+    return "\n".join(x for x in (wt, tidy) if x) or None
 
 
 def tidy_nudge(root, sid, st=None):
@@ -3586,6 +3599,100 @@ def committed_paths(root, cmd):
         except ValueError:
             pass
     return sorted(paths)
+
+
+def default_branch(repo):
+    r = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", timeout=5)
+    if r.returncode == 0:
+        return r.stdout.decode().strip().split("/", 1)[-1]
+    return next((b for b in ("main", "master") if git(repo, "rev-parse", "-q", "--verify", "refs/heads/" + b, timeout=5).returncode == 0), None)
+
+
+def git_worktrees(repo):
+    """The repo's linked worktrees (not the main checkout), as dicts of `git worktree list --porcelain` fields."""
+    out = []
+    for line in git(repo, "worktree", "list", "--porcelain", timeout=10).stdout.decode(errors="replace").splitlines():
+        k, _, v = line.partition(" ")
+        if k == "worktree":
+            out.append({"path": os.path.realpath(v)})
+        elif out:
+            out[-1][k] = v or True
+    return out[1:]
+
+
+def worktree_owner(root, st, path):
+    """The session that ran `git worktree add` for it; else the one holding or editing files under it."""
+    if st.get("worktrees", {}).get(path):
+        return st["worktrees"][path]
+    r = rel(root, path)
+    if r:
+        for k, l in st.get("leases", {}).items():
+            if k.startswith(r + "/"):
+                return l["sid"]
+        for x in sorted(st["sessions"].values(), key=lambda x: -x["last"]):
+            if any(p.startswith(r + "/") for p in x["files"]):
+                return x["id"]
+    return None
+
+
+def worktree_state(repo, w, dflt):
+    """merged (into origin/<default>, so pushed too), pushed, or unpushed; clean; prunable."""
+    tgt = "origin/" + dflt if dflt and git(repo, "rev-parse", "-q", "--verify", "origin/" + dflt, timeout=5).returncode == 0 else dflt
+    head = w.get("HEAD", "")
+    if tgt and git(repo, "merge-base", "--is-ancestor", head, tgt, timeout=10).returncode == 0:
+        w["merge"] = "merged"
+    else:
+        w["merge"] = "unpushed" if git(repo, "rev-list", "-n1", head, "--not", "--remotes", timeout=10).stdout.strip() else "pushed"
+    st_ = git(w["path"], "status", "--porcelain", timeout=10)
+    w["clean"] = st_.returncode == 0 and not st_.stdout.strip()
+    try:
+        w["age"] = now() - os.path.getmtime(os.path.join(w["path"], ".git"))  # written once, by worktree add
+    except OSError:
+        w["age"] = 0
+    # ponytail: an hour of age so a fresh worktree still at main's tip isn't called prunable before work starts
+    w["prunable"] = w["merge"] == "merged" and w["clean"] and not w.get("locked") and w["age"] > 3600
+    return w
+
+
+def note_worktree_add(root, sid, who, cmd, cwd):
+    """PostToolUse: a `git worktree add` just ran; record which worktree it made and who owns it."""
+    st = load_state(root)
+    for w in git_worktrees(cwd or root):
+        b = os.path.basename(w["path"])
+        if w["path"] not in st.get("worktrees", {}) and re.search(r"(?:^|[\s/'\"])%s/?(?:$|[\s'\";&|])" % re.escape(b), cmd):
+            emit(root, sid=sid, agent=who, kind="worktree", path=w["path"], title="Worktree added: " + w["path"])
+
+
+PUSHED = re.compile(r"^\s*[+ ]?\s*([0-9a-f]{7,40})\.{2,3}([0-9a-f]{7,40})\s+\S+\s+->\s+(?:refs/heads/)?(\S+)", re.M)
+
+
+def note_push(root, sid, who, resp, cwd):
+    """PostToolUse: a `git push` moved the default branch; post it to the board once (fyi, wakes nobody)."""
+    text = "\n".join(str(v) for v in resp.values()) if isinstance(resp, dict) else str(resp or "")
+    repo = cwd or root
+    for old, new, dst in PUSHED.findall(text):
+        if dst != default_branch(repo):
+            continue
+        subj = git(repo, "log", "--format=%s", new, "--not", old, timeout=10).stdout.decode(errors="replace").splitlines()
+        more = " (+%d more)" % (len(subj) - 3) if len(subj) > 3 else ""
+        emit(root, sid=sid, agent=who, kind="msg", to=["board"], msgKind="fyi", title="%s moved to %s: %s%s (by %s)" % (
+            dst, new[:7], clip("; ".join(subj[:3]), 300) or "?", more, sname(load_state(root), sid)))
+
+
+def worktree_nudge(root, sid, st):
+    """Upkeep, at most hourly per session: worktrees this session made that are merged, pushed and clean."""
+    f = os.path.join(bdir(root), "tidy", re.sub(r"[^\w-]", "_", sid) + ".wt")
+    try:
+        if now() - os.path.getmtime(f) < 3600:
+            return None
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    open(f, "w").close()
+    mine = [w for w in git_worktrees(root) if worktree_owner(root, st, w["path"]) == sid]
+    dflt = default_branch(root) if mine else None
+    return "\n".join("Your worktree %s is merged and pushed: git worktree remove %s" % (w["path"], shlex.quote(w["path"]))
+                     for w in mine if worktree_state(root, w, dflt)["prunable"]) or None
 
 
 def needs_user(st):
@@ -4364,6 +4471,7 @@ def main():
     ib = sub.add_parser("inbox", help="your unread messages (marks them read)")
     ib.add_argument("--all", action="store_true", help="recent mail to and from you, read or not")
     ib.add_argument("--session", **sess)
+    sub.add_parser("worktrees", help="git worktrees: owner, branch, merged/pushed, size, age; prunable = merged, pushed and clean")
     bd = sub.add_parser("board", help="the project board: pinned notices and recent posts")
     bd.add_argument("-n", type=int, default=20)
     up = sub.add_parser("unpin", help="take notices off the board's pinned list (superseded or done)")
@@ -4548,6 +4656,19 @@ def main():
                 print("    " + clip(m["body"], 600).replace("\n", "\n    "))
             for r in [r for r in posts if r["re"] == m["id"]]:
                 print("    ↳ [%s] %s: %s  (%s)" % (r["id"], who_label(st, r), clip(r["title"], 200), ago(r["ts"])))
+        return 0
+    if a.cmd == "worktrees":
+        wts, dflt = git_worktrees(root), default_branch(root)
+        for w in wts:
+            worktree_state(root, w, dflt)
+            o = worktree_owner(root, st, w["path"])
+            kb = subprocess.run(["du", "-sk", w["path"]], capture_output=True, text=True).stdout.split("\t")[0]
+            print("%s%s\n    owner %s, branch %s, %s, %s, %s MB, %s%s" % (
+                "PRUNABLE " if w["prunable"] else "", w["path"], sname(st, o) if o else "?",
+                w.get("branch", "(detached)").replace("refs/heads/", ""), w["merge"], "clean" if w["clean"] else "dirty",
+                int(kb) // 1024 if kb.isdigit() else "?", ago(now() - w["age"]), ", locked" if w.get("locked") else ""))
+        print("Remove a prunable one with: git worktree remove <path>" if any(w["prunable"] for w in wts) else
+              "" if wts else "No linked worktrees.")
         return 0
     if a.cmd == "who":
         live = sorted([x for x in st["sessions"].values() if is_live(x)], key=lambda x: -x["last"])

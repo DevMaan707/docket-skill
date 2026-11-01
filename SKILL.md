@@ -213,6 +213,8 @@ docket board                                           # pinned notices and rece
 - **Post to the board** facts every session should know that don't belong to one work item:
   shared machines and their load, a changed baseline, a wiped directory, a rule the user set.
   `--pin` shows it to every new session at start (`unpin <id>` when it no longer holds).
+- **Don't send HANDSHAKE / "MAIN = <sha>" messages:** docket posts to the board when a push moves main.
+  `docket worktrees` lists git worktrees with owner, merged/pushed, size; remove yours once prunable.
 - **Keep the shared record clean.** `docket tidy` lists what nobody owns and has gone stale:
   pins over a day old, notes to the user that may already be settled, open items untouched for a
   day, live sessions whose brief lags their work. Every few hours the steward hands that list to
