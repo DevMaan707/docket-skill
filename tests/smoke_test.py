@@ -539,7 +539,7 @@ def main():
         run(["hook"], d, stdin=json.dumps(dict(hook_event_name="SessionStart", session_id="sWake", cwd=d)),
             extra_env=dict(CLAUDE_CODE_MESSAGING_SOCKET=sockp))
         run(["name", "Wake target"], d, "sWake")
-        code, out = run(["msg", "Wake target", "Your gate finished"], d, "sM2")
+        code, out = run(["msg", "Wake target", "Your gate finished", "--kind", "finding"], d, "sM2")  # plain fyi never wakes
         th.join(12); srv.close()
         sw = json.load(open(os.path.join(d, ".docket", "state.json")))["sessions"].get("sWake", {})
         line = json.loads(got[0].splitlines()[0]) if got else {}
@@ -801,7 +801,7 @@ def main():
                 break
             time.sleep(0.1)
         check("a running listener lets the session stop", "decision" not in stopL("sM1"))
-        run(["msg", "Gate speed", "Gate is green, your turn"], d, "sM2")
+        run(["msg", "Gate speed", "Gate is green, your turn", "--kind", "finding"], d, "sM2")
         try:
             lout = lp.communicate(timeout=20)[0]
         except subprocess.TimeoutExpired:
@@ -813,7 +813,7 @@ def main():
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=30)
         check("a listener whose output goes to /dev/null is refused", dn.returncode != 0 and "run_in_background" in dn.stderr,
               dn.stderr)
-        run(["msg", "Gate speed", "One more thing"], d, "sM2")
+        run(["msg", "Gate speed", "One more thing", "--kind", "finding"], d, "sM2")
         out = stopL("sM1")
         check("mail that lands as a turn ends is handed over at Stop", '"block"' in out and "One more thing" in out, out)
 
