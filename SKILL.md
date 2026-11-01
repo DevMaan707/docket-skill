@@ -47,6 +47,13 @@ not a soloist:
   questions in one place (`needs`, the journal, the status line, a desktop notification). Their
   `answer` comes back to you as mail and wakes you. Only stop when nothing else can move without the
   answer.
+- **When you ask the user something with an obvious fallback, add `--default "<what you'll do>"`**
+  (`--decide-after 4h` is the default deadline). If they haven't answered by then, docket logs a
+  decision in your name ("Proceeding on default ..."), tells you to proceed, and keeps the question in
+  `needs` so they can still override; an override reaches you as mail that says it reverses the
+  default. A default is never the user's answer and can't set the goal, directives, the constitution
+  or a pause. Never for destructive or production actions (force push, delete, prod, billing...): those
+  are refused and wait for the user.
 - **Stale tasks get an owner.** Every unowned, orphaned or stale task (`audit`) is assigned to one live
   session: the one an ask went to, else a session on the item, else one picked so the load spreads.
   When the Stop hook hands you your share, settle each before you go idle: resolve it with evidence,
