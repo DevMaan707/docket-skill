@@ -462,8 +462,11 @@ def _pid(prefix, *parts):
     return prefix + "-" + hashlib.sha1("|".join(parts).encode()).hexdigest()[:6]
 
 
+NOT_SESSIONS = ("user", "manual", "steward")  # bookkeeping identities docket writes as, never a working session
+
+
 def is_live(s):
-    return bool(s) and s["status"] != "ended" and now() - s["last"] < LIVE_SECS and not process_gone(s)
+    return bool(s) and s["id"] not in NOT_SESSIONS and s["status"] != "ended" and now() - s["last"] < LIVE_SECS and not process_gone(s)
 
 
 PASSES_TO_DROP = 2  # sessions that must judge a day-old task not worth doing before it's removed
@@ -551,7 +554,7 @@ def pending_items(st, wid):
         passes = [x for p in [it["pid"]] + [c["pid"] for c in it["copies"]] for x in w.get("passes", {}).get(p, [])]
         it["passedBy"] = sorted({x["sid"] for x in passes})
         if it["status"] == "open" and passes and it["source"] != "criterion":
-            live = {x["id"] for x in st["sessions"].values() if is_live(x) and x["id"] not in ("user", "manual", "steward")}
+            live = {x["id"] for x in st["sessions"].values() if is_live(x)}
             if len(it["passedBy"]) >= PASSES_TO_DROP or (live and live <= set(it["passedBy"])):
                 it.update(status="dropped", by=None, reason="no session took it up: " + "; ".join(
                     "%s: %s" % (sname(st, x["sid"]), x["reason"]) for x in passes))
@@ -647,7 +650,7 @@ def drop_leases(st, pred):
 
 def lease_active(st, l):
     s = st["sessions"].get(l["sid"])
-    if not is_live(s):
+    if not (is_live(s) or s and s["id"] in NOT_SESSIONS and now() - s["last"] < LIVE_SECS):  # a claim typed in a terminal
         return False
     if l["agent"] != "main" and (s["agents"].get(l["agent"]) or {}).get("status") != "running":
         return False
@@ -843,13 +846,15 @@ def apply(st, ev):
         st["goal"] = {"id": ev["id"], "text": body, "ts": ts, "sid": sid, "status": "active",
                       "autonomous": bool(ev.get("autonomous")), "note": "", "thread": ev.get("thread"),
                       "until": ev.get("until") or ""}
-        st["lanes"] = {}
+        st["lanes"] = {k: v for k, v in st.get("lanes", {}).items() if k == "lead"}  # the lead outlasts a goal
     elif kind == "lane":
         key = _norm(title) or title.lower()
         if ev.get("drop"):
             st.get("lanes", {}).pop(key, None)
         else:
-            st.setdefault("lanes", {})[key] = {"name": title, "scope": body, "sid": sid, "ts": ts}
+            st.setdefault("lanes", {})[key] = {"name": title, "scope": body, "sid": ev.get("holder") or sid, "by": sid, "ts": ts}
+    elif kind == "idle_set":
+        st["idleMin"] = max(0, ev.get("minutes") or 0)
     elif kind == "aim":  # the product aim the lead wrote; a new version is a draft until the user confirms it
         st["aim"] = {"id": ev["id"], "text": body, "ts": ts, "sid": sid, "status": "draft"}
     elif kind == "aim_confirm" and st.get("aim"):
@@ -2375,15 +2380,19 @@ LEAD_MIN_PROMPTS = 3
 
 
 def lead_of(st):
-    """The lead is the session the user talks to most: the live one with the most prompts the user typed
-    in the last day (at least LEAD_MIN_PROMPTS). A session that took the lead explicitly (docket lead,
-    when the user says so) holds it while it's live."""
+    """The lead is the session the user talks to most (the hub), unless a live session holds the "lead"
+    lane: it took the lead (docket lead) or the hub or lead handed it over (docket lead <session>)."""
     l = st.get("lanes", {}).get("lead")
     if l and is_live(st["sessions"].get(l["sid"])):
         return l["sid"]
+    return hub_of(st)
+
+
+def hub_of(st):
+    """The live session with the most prompts the user typed in the last day (at least LEAD_MIN_PROMPTS)."""
     t, best = now(), None
     for x in st["sessions"].values():
-        if x["id"] in ("user", "manual", "steward") or not is_live(x):
+        if not is_live(x):
             continue
         n = sum(1 for p in x.get("userPrompts") or [] if t - p < 86400)
         key = (n, x.get("promptTs", 0))
@@ -2393,14 +2402,22 @@ def lead_of(st):
 
 
 def role_block(st, sid):
-    """The lead gets the product-owner charter; everyone else, when a lead exists, the member charter.
-    Both see the aim (draft or confirmed)."""
-    lead, a = lead_of(st), st.get("aim")
+    """The lead gets the product-owner charter; the hub, when it handed the lead to another session, a short
+    note; everyone else, when a lead exists, the member charter. All see the aim (draft or confirmed); with
+    no aim recorded, the user's standing goal is the confirmed aim (it is their own words)."""
+    lead, a, g = lead_of(st), st.get("aim"), st.get("goal")
+    g = g if g and g["status"] == "active" else None
     aim = ("Product aim (%s, by %s %s):\n%s" % (
         "confirmed by the user" if a["status"] == "confirmed" else "DRAFT, not yet confirmed by the user",
-        sname(st, a["sid"]), ago(a["ts"]), clip(a["text"].strip(), 1500)) if a else None)
+        sname(st, a["sid"]), ago(a["ts"]), clip(a["text"].strip(), 1500)) if a else
+        "Product aim (confirmed: the user's standing goal, their own words, %s; refine it with aim set):\n%s" % (
+            ago(g["ts"]), clip(g["text"].strip(), 1500)) if g else None)
     if lead and lead in selves(st, sid):
         body = [LEAD_CHARTER, "", aim or "No aim recorded yet: start at step 1."]
+    elif lead and hub_of(st) in selves(st, sid):
+        body = ["%s coordinates this project as lead; the user talks to you most. Relay the user's words to it "
+                "(msg %s \"...\") and answer what it escalates; don't run the lanes yourself." % (sname(st, lead), lead[:8])]
+        body += ["", aim] if aim else []
     elif lead:
         body = [MEMBER_CHARTER % sname(st, lead), "", aim or "The lead hasn't recorded the aim yet; ask it for your brief."]
     elif aim:
@@ -2413,8 +2430,10 @@ def role_block(st, sid):
 def role_changed(root, st, sid):
     """The role block again when this session's role (lead, member, none) or the aim changed since it last
     saw it: the lead moves to whichever session the user talks to most, mid-session too."""
-    lead, a = lead_of(st), st.get("aim") or {}
-    key = "%s|%s|%s" % ("lead" if lead and lead in selves(st, sid) else lead or "-", a.get("id"), a.get("status"))
+    lead, a, me = lead_of(st), st.get("aim") or {}, selves(st, sid)
+    g = st.get("goal") or {}
+    key = "%s|%s|%s|%s" % ("lead" if lead in me else "hub" if lead and hub_of(st) in me else lead or "-",
+                           a.get("id"), a.get("status"), not a and g.get("status") == "active" and g.get("id"))
     f = os.path.join(bdir(root), "role", re.sub(r"[^\w-]", "_", sid))
     try:
         if open(f).read() == key:
@@ -2450,7 +2469,7 @@ def task_owner(st, wid, pid):
     item, else a live session picked by a stable hash so the load spreads and nothing is skipped."""
     passed = {x["sid"] for x in st["work"].get(wid, {}).get("passes", {}).get(pid, [])}  # ask someone new
     live = sorted(x["id"] for x in st["sessions"].values()
-                  if is_live(x) and x["id"] not in ("user", "manual", "steward") and x["id"] not in passed)
+                  if is_live(x) and x["id"] not in passed)
     if not live:
         return None
     if pid.startswith("A-"):
@@ -2640,19 +2659,23 @@ IDLE_WAKE_SECS, REWAKE_SECS = 1200, 1800
 
 
 def rouse_idle(root, st, sent):
-    """While an autonomous goal is open, wake sessions that have sat idle for 20 minutes (each at most every
-    30): the Stop hook only pushes a session as it stops, so without this an idle one stays idle.
+    """While an autonomous goal is open, wake sessions that have sat idle for 20 minutes or the user's
+    interval (docket idle N; each at most every 1.5x that): the Stop hook only pushes a session as it
+    stops, so without this an idle one stays idle.
     `sent` maps session id -> when we last woke it. Returns who was woken."""
     g = st.get("goal")
     if not (g and g["status"] == "active" and g["autonomous"]) or st.get("paused") \
             or memory(root)["level"] == "critical":
         return []
     out, c = [], cli()
+    idle = st.get("idleMin", IDLE_WAKE_SECS // 60) * 60  # docket idle N: the user's interval
+    if not idle:
+        return []
     for x in st["sessions"].values():
-        if x["id"] in ("user", "manual", "steward") or x["status"] == "ended" or x.get("next") or not x.get("sock") \
+        if x["id"] in NOT_SESSIONS or x["status"] == "ended" or x.get("next") or not x.get("sock") \
                 or x.get("host") != socket.gethostname() or process_gone(x):
             continue
-        if now() - x["last"] < IDLE_WAKE_SECS or now() - sent.get(x["id"], 0) < REWAKE_SECS \
+        if now() - x["last"] < idle or now() - sent.get(x["id"], 0) < idle * REWAKE_SECS // IDLE_WAKE_SECS \
                 or x.get("waitUntil", 0) > now():
             continue
         if any(e["kind"] == "blocker" and not e.get("resolved") and e["ts"] >= x.get("promptTs", 0)
@@ -4377,7 +4400,11 @@ def main():
     sub.add_parser("tidy", help="what nobody owns and has gone stale: old pins, settled needs, idle items, lagging briefs")
     sub.add_parser("who", help="live sessions you can message")
     ld = sub.add_parser("lead", help="become the lead: product owner who interviews the user, writes the aim, plans and briefs lanes")
+    ld.add_argument("to", nargs="?", help="hand the lead to this session (the hub or the lead does this)")
     ld.add_argument("--session", **sess)
+    idl = sub.add_parser("idle", help="how often docket nudges idle sessions while an autonomous goal is open (0: off)")
+    idl.add_argument("minutes", nargs="?", type=int)
+    idl.add_argument("--session", **sess)
     am = sub.add_parser("aim", help="the product aim: show, set (the lead's draft), confirm (the user's yes)")
     am.add_argument("action", nargs="?", choices=["show", "set", "confirm"], default="show")
     am.add_argument("text", nargs="?", default="")
@@ -4804,13 +4831,24 @@ def main():
         print(lanes_text(st))
         return 0
     if a.cmd == "lead":
-        held = lead_of(st)
-        if held and held not in selves(st, sid):
-            sys.exit("%s is the lead: the user talks to it most. Message it instead (msg %s \"...\")." % (sname(st, held), held[:8]))
-        if not held:
-            emit(root, sid=sid, kind="lane", title="lead", body="Product owner: aim, plan, lane briefs, acceptance")
+        held, me = lead_of(st), selves(st, sid)
+        if held and held not in me and hub_of(st) not in me:
+            sys.exit("%s is the lead. Message it instead (msg %s \"...\")." % (sname(st, held), held[:8]))
+        to = recipients(st, sid, [a.to])[0] if a.to else sid
+        if not is_live(st["sessions"].get(to)):
+            sys.exit("%s is not a live session (see: who)." % a.to)
+        if held not in selves(st, to):
+            emit(root, sid=sid, kind="lane", title="lead", holder=to,
+                 body="Product owner: aim, plan, lane briefs, acceptance" + ("" if to == sid else " (named by %s)" % sname(st, sid)))
             st = load_state(root)
         print(role_block(st, sid))
+        return 0
+    if a.cmd == "idle":
+        if a.minutes is not None:
+            emit(root, sid=sid, kind="idle_set", title="Idle sessions nudged after %d min" % a.minutes, minutes=a.minutes)
+            st = load_state(root)
+        m = st.get("idleMin", IDLE_WAKE_SECS // 60)
+        print("Idle sessions are nudged after %d min while an autonomous goal is open." % m if m else "Idle nudges are off.")
         return 0
     if a.cmd == "aim":
         text = (a.text or a.body).strip()
