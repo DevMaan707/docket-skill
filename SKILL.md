@@ -207,6 +207,8 @@ docket board                                           # pinned notices and rece
 
 - **Mail arrives on its own.** Unread messages are injected with your next prompt and after any
   tool call while you're mid-turn, inside `<docket-mail>`, then marked read. Answer with `reply`.
+- **Don't reply just to acknowledge;** the sender sees that you read it ("Seen by 6/9" in its mail,
+  `inbox`, `show <msg id>`). Reply only with an answer, a disagreement, or a result.
 - **Status belongs in your brief,** not in mail. Fyi mail to a busy lead (over 20 in 2 hours) is
   batched into a digest every 30 min (`DOCKET_DIGEST_MINUTES`) and doesn't wake it; asks, findings
   and replies to its threads still arrive at once. `docket show <msg id>` reads one in full.
@@ -243,8 +245,10 @@ docket board                                           # pinned notices and rece
 - **Asks unanswered 2 h past due escalate** to the lane owner or the board, once (to the successor if
   the asked session ended and someone took over its identity). The asker is told; `audit` shows them as
   `ESCALATED`. An escalation that reaches you is yours to answer: `reply <original ask id>`.
-- **Idle sessions are woken.** With Claude Code 2.1.224 or later, `msg`, new directives and a new
-  goal post a short nudge into the recipient's Claude Code inbox. An idle session starts a turn with
+- **Idle sessions are woken** for asks, findings, the user's and the steward's mail, answers to an
+  ask, new directives and a new goal; plain fyi (and a bare "ack"/"thanks") never wakes anyone, it
+  waits for the recipient's next prompt or tool call. With Claude Code 2.1.224 or later, these
+  post a short nudge into the recipient's Claude Code inbox. An idle session starts a turn with
   it, and a busy one reads it between tool calls. The full text still arrives through the hooks. On
   older versions, run `docket listen --session <id>` with Bash `run_in_background: true` before you
   stop (never `&` or `> /dev/null`); the Stop hook reminds you. Docket learns per session whether

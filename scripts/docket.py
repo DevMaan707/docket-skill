@@ -119,6 +119,8 @@ the aim below and the lead's brief for your lane.
 - Make implementation calls yourself and log them (decision --rejected). Ask the lead, not the
   user, when the brief is ambiguous in a way that changes the outcome: early, one concrete question.
 - Report through your brief (now / done / next / blocked); the lead reads briefs, not status mail.
+- Don't reply just to acknowledge; the sender sees that you read it. Reply only with an answer, a
+  disagreement, or a result.
 - Done means the acceptance checks pass with evidence you ran this turn; then hand it to review.
   Don't stop early, don't gold-plate."""
 
@@ -134,6 +136,8 @@ CHARTER = """How to work under it (autonomous mode, set by the user):
   reopen it with what's missing; not done -> do it if it's in your lane, otherwise tell the lane owner.
 - Keep each other updated. Reply on the goal thread at every milestone with measured numbers, what
   changed, and what's next; read others' updates before you plan your next step.
+- Don't reply just to acknowledge; the sender sees that you read it. Reply only with an answer, a
+  disagreement, or a result.
 - Don't wait for the user's permission on decisions inside this goal. Decide, log the decision with the
   options you rejected, and keep going. Stop only for a real blocker (missing access or credentials, a
   destructive or irreversible step the goal doesn't cover): log it as a blocker so others see it.
@@ -2195,7 +2199,8 @@ def handle_hook(inp):
         if who == "main" and not inp.get("stop_hook_active") and os.environ.get("DOCKET_LISTEN") != "off":
             st = load_state(root)
             start_rouser(root, st)
-            late = deliver(root, sid, st)  # arrived while this turn was finishing
+            # arrived while this turn was finishing; plain fyi waits for the next prompt, no extra round
+            late = deliver(root, sid, st, any(rouses(st, m) for m in mail_split(st, sid)[0]))
             if not late:
                 late = upkeep(root, sid, st)
             me = st["sessions"].get(sid, {})
@@ -2333,6 +2338,8 @@ def mail_block(st, sid, flush=False):
                        % (m["id"][:6], ", ".join(m["wids"]) or "no work item", m["id"][:6]))
     if digest:
         out.append(digest_text(st, digest))
+    if seen_text(st, sid):
+        out.append(seen_text(st, sid))
     if posts:
         out.append("New on the board (%s board): " % c + "; ".join(
             "[%s] %s: %s" % (m["id"], who_label(st, m), clip(flag_suspicious(m["title"]), 100))
@@ -2580,7 +2587,7 @@ def agent_cap(st):
     return min(caps) if caps else None
 
 
-def deliver(root, sid, st=None):
+def deliver(root, sid, st=None, mail=True):
     """What a session hasn't seen yet: new directives, a new standing goal, then unread mail."""
     st = st or load_state(root)
     g, out = st.get("goal"), []
@@ -2591,7 +2598,8 @@ def deliver(root, sid, st=None):
     if g and g["status"] == "active" and st["sessions"].get(sid, {}).get("goalSeen") != g["id"]:
         out.append(goal_block(st))
         emit(root, sid=sid, kind="goal_seen", ref=g["id"], title="Read the standing goal")
-    out.append(deliver_mail(root, sid, st))
+    if mail:
+        out.append(deliver_mail(root, sid, st))
     return "\n".join(x for x in out if x) or None
 
 
@@ -2980,6 +2988,39 @@ def batched(st, sid, msgs):
     return [m for m in msgs if status(m)]
 
 
+BARE_ACK = re.compile(r"(?i)\W*(ack(nowledged)?|noted|agreed|thanks?( you)?|got it|ok(ay)?|will do|roger|"
+                      r"understood|sounds good|\+1)\W*")
+
+
+def rouses(st, m):
+    """Mail worth waking an idle session for: asks, findings, the user's and the steward's mail (answers,
+    escalations, defaults) and answers in an ask's thread. Plain fyi and bare acks wait for the next hook."""
+    r = find_msg(st, m["re"]) if m.get("re") else None
+    return m["sid"] == "user" or not (BARE_ACK.fullmatch(m["title"]) and not m["body"]) and (
+        m.get("kind") in ("ask", "finding") or m["sid"] == "steward" or bool(r and r.get("kind") == "ask"))
+
+
+def seen(st, m):
+    """(who read it, who it reached): read receipts, so nobody needs to send an ack."""
+    to, me = set(m["to"]), selves(st, m["sid"])
+    read = set(m["readBy"]) - me
+    aud = {x["id"] for x in st["sessions"].values() if x["id"] not in me | {"user", "manual", "steward"}
+           and x["status"] != "ended" and (x["id"] in to or x.get("work") in to
+                                           or to & {"all", "board"} and x.get("started", 0) <= m["ts"])}
+    return read, aud | read
+
+
+def seen_text(st, sid, secs=3600):
+    """Read receipts for this session's last few messages."""
+    rows = []
+    for m in [m for m in st.get("msgs", []) if m["sid"] in selves(st, sid) and now() - m["ts"] < secs
+              and m["to"] != ["user"]][-5:]:
+        r, a = seen(st, m)
+        rows.append("[%s] %d/%d%s" % (m["id"], len(r), len(a), " (%s)" % ", ".join(sorted(sname(st, x) for x in r))
+                                      if 0 < len(r) <= 3 else ""))
+    return "Seen by (your messages of the last hour): " + "; ".join(rows) if rows else None
+
+
 def mail_split(st, sid, flush=False):
     """Unread mail as (deliver now, deliver as a digest). Held status fyi wait until DIGEST_SECS after
     the last digest; flush (docket inbox) hands them over anyway."""
@@ -3057,7 +3098,7 @@ def listen(root, sid, hours):
                 s = st["sessions"].get(sid)
                 if s and (s["status"] == "ended" or process_gone(s)):
                     return 0
-                g, got = st.get("goal"), mail_split(st, sid)[0]
+                g, got = st.get("goal"), [m for m in mail_split(st, sid)[0] if rouses(st, m)]
                 news = ["- [%s] %s from %s: %s" % (x["id"], MSG_KINDS.get(x.get("kind"), "FYI"), who_label(st, x),
                                                      flag_suspicious(x["title"])) for x in got[-10:]]
                 if [d_ for d_ in directives(st) if d_["id"] not in (s or {}).get("dirSeen", [])]:
@@ -3243,6 +3284,9 @@ def wake(st, ev, text=None):
     still arrives through the hooks; this only makes sure nobody sleeps through it."""
     if os.environ.get("DOCKET_WAKE") == "off":
         return 0
+    m = next((m for m in st.get("msgs", []) if m["id"] == ev.get("id")), None)
+    if text is None and not (m and rouses(st, m)):
+        return 0  # plain fyi: it arrives with the recipient's next prompt or tool call, no extra turn
     me, to = selves(st, ev["sid"]), set(ev.get("to") or ["all"])
     host, n, hit = socket.gethostname(), 0, []
     for x in st["sessions"].values():
@@ -3251,7 +3295,7 @@ def wake(st, ev, text=None):
         wids = {w for w, it in st["work"].items() if any(y["sid"] in selves(st, x["id"]) for y in it["sessions"])}
         if not ("all" in to or selves(st, x["id"]) & to or wids & to):
             continue
-        if text is None and batched(st, x["id"], [m for m in st.get("msgs", []) if m["id"] == ev.get("id")]):
+        if text is None and batched(st, x["id"], [m]):
             continue  # status fyi to a hub: it waits for the digest
         line = text or ("[docket] %s from %s: %s\nRead it with `%s inbox --session %s` (it also arrives with your next "
                         "tool call), then answer with `%s reply %s \"...\"`."
@@ -4613,8 +4657,10 @@ def main():
             return 0
         m_ = not wid and not e and find_msg(st, a.wid)
         if m_:
-            print("[%s] %s from %s to %s, %s: %s\n%s" % (m_["id"], MSG_KINDS.get(m_.get("kind"), "FYI"), who_label(st, m_),
-                                                     to_label(st, m_["to"]), ago(m_["ts"]), m_["title"], m_["body"]))
+            r_, a_ = seen(st, m_)
+            print("[%s] %s from %s to %s, %s: %s\n%s\nSeen by %d/%d%s" % (
+                m_["id"], MSG_KINDS.get(m_.get("kind"), "FYI"), who_label(st, m_), to_label(st, m_["to"]), ago(m_["ts"]),
+                m_["title"], m_["body"], len(r_), len(a_), ": " + ", ".join(sorted(sname(st, x) for x in r_)) if r_ else ""))
             return 0
         if not wid:
             sys.exit("No such work item or entry: %s" % a.wid)
@@ -5093,10 +5139,11 @@ def main():
             mine = {sid, "all", s_.get("work")} - {None}
             for m in [m for m in st.get("msgs", []) if m["sid"] == sid or mine & set(m["to"])][-30:]:
                 print("[%s] %s → %s, %s: %s%s" % (m["id"], who_label(st, m), to_label(st, m["to"]), ago(m["ts"]),
-                                                m["title"], "" if m["sid"] == sid or sid in m["readBy"] else "  (unread)"))
+                                                m["title"], "  (seen %d/%d)" % tuple(map(len, seen(st, m))) if m["sid"] == sid
+                                                else "" if sid in m["readBy"] else "  (unread)"))
             return 0
         text = deliver_mail(root, sid, st, flush=True)
-        print(text or "No unread messages.")
+        print(text or "\n".join(x for x in ("No unread messages.", seen_text(st, sid)) if x))
         return 0
     if a.cmd == "leases":
         act = [(k, l) for k, l in sorted(st.get("leases", {}).items()) if lease_active(st, l)]
