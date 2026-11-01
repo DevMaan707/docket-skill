@@ -833,9 +833,12 @@ def apply(st, ev):
     elif kind == "name":
         s["name"] = title
     elif kind == "prompt":
+        h = hashlib.sha1(body.strip()[:80].encode("utf-8")).hexdigest()[:10]  # loops vary further in
         s["prompt"], s["status"], s["promptTs"], s["continues"] = body, "working", ts, 0
-        if not body.startswith("[docket]"):  # the user typed it (docket's own wake-ups start with [docket])
-            s["userPrompts"] = (s.get("userPrompts") or [])[-49:] + [ts]
+        if not body.lstrip().startswith(("[docket]", "<")) and h not in (s.get("typedSeen") or []):
+            # the user typed it: not a docket wake-up, a <task-notification>, or a loop resending the same text
+            s["userPrompts"] = (s.get("userPrompts") or [])[-199:] + [ts]
+            s["typedSeen"] = (s.get("typedSeen") or [])[-29:] + [h]
     elif kind == "goal_set":
         st["goal"] = {"id": ev["id"], "text": body, "ts": ts, "sid": sid, "status": "active",
                       "autonomous": bool(ev.get("autonomous")), "note": "", "thread": ev.get("thread"),

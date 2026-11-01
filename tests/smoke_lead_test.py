@@ -37,6 +37,9 @@ def _main(d):
     for i in range(4):  # docket's own wake-ups are not the user talking
         c = hook(d, "UserPromptSubmit", "sB", prompt="[docket] you've been idle 20 min")
         member = c if i == 0 else member
+    for _ in range(4):  # nor are background-task notices or a loop resending the same prompt
+        hook(d, "UserPromptSubmit", "sB", prompt="<task-notification><summary>job done</summary></task-notification>")
+        hook(d, "UserPromptSubmit", "sB", prompt="Session sweep (every 20 min): check mail")
     st = docket.load_state(d)
     check("the lead is the session the user talks to most", docket.lead_of(st) == "sA", docket.lead_of(st))
     check("the lead gets the product-owner charter once it becomes lead", "You are the lead" in ctx, ctx[-400:])
