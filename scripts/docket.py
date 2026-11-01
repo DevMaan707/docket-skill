@@ -912,8 +912,10 @@ def apply(st, ev):
             id=ev["id"], ts=ts, sid=sid, agent=who, to=ev.get("to") or ["board"], title=title,
             body=body, re=ev.get("re"), pin=bool(ev.get("pin")), wid=s.get("work"), readBy=[],
             kind=ev.get("msgKind") or "fyi", files=ev.get("files") or [], wids=ev.get("wids") or [], due=ev.get("due")))
+        if ev.get("default"):  # a question to the user with the asker's fallback
+            st["msgs"][-1].update(default=ev["default"], defaultAt=ev["defaultAt"])
         st["msgs"] = st["msgs"][-MAX_MSGS:]
-        if sid == "steward":  # tidy duty rotates: whoever had it last goes to the back
+        if sid == "steward" and not ev.get("defaultFor"):  # tidy duty rotates: whoever had it last goes to the back
             for t in ev.get("to") or []:
                 if t in st["sessions"]:
                     st["sessions"][t]["stewardTs"] = ts
@@ -943,6 +945,10 @@ def apply(st, ev):
         for m in st.get("msgs", []):
             if m["id"] == ev.get("ref"):
                 m["withdrawn"] = ev.get("body") or True
+    if kind == "decision" and ev.get("defaultFor"):  # docket applied the asker's default: not the user's answer
+        for m in st.get("msgs", []):
+            if m["id"] == ev["defaultFor"]:
+                m["defaulted"] = ts
 
     if kind in ENTRY_KINDS and kind not in ("task", "unblock"):
         e = {"id": ev["id"], "ts": ts, "kind": "summary" if kind == "done" else kind,
@@ -1060,7 +1066,7 @@ SECRETS = [
     (re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9_\-/.+=~]{8,512}"), r"\1[REDACTED]"),
     (re.compile(r"(?i)\b([a-z][a-z0-9+.-]{1,20}://[^\s:/@\"']{1,256}:)[^\s@/\"']{1,256}(?=@)"), r"\1[REDACTED]"),
 ]
-SCRUB_KEYS = ("title", "body", "prompt", "desc", "now", "done", "next", "blocked", "evidence", "rejected", "reason")
+SCRUB_KEYS = ("title", "body", "prompt", "desc", "now", "done", "next", "blocked", "evidence", "rejected", "reason", "default")
 
 
 def scrub(s):
@@ -2056,6 +2062,7 @@ def handle_hook(inp):
             first = next((l.strip("# ").strip() for l in plan.splitlines() if l.strip()), "Plan")
             emit(root, kind="plan", title=clip(first, 120), body=clip(plan, 8000), **E)
         if who == "main":  # mail, new goals and a stale-brief nudge reach a session mid-turn
+            default_check(root)
             out = [deliver(root, sid) if mail_waiting(root, sid) else None, tidy_nudge(root, sid), ctx_nudge(root, sid)]
             if any(out):
                 hook_output(event, "\n".join(x for x in out if x))
@@ -3177,8 +3184,8 @@ def needs_user(st):
     msgs = st.get("msgs", [])
     for m in msgs:
         if "user" in m["to"] and not m.get("withdrawn") and not any(r["re"] == m["id"] and r["sid"] == "user" for r in msgs):
-            out.append({"id": m["id"], "what": "%s from %s" % ("Question" if m.get("kind") == "ask" else "Note",
-                                                                  sname(st, m["sid"])), "title": m["title"], "ts": m["ts"]})
+            out.append({"id": m["id"], "what": "%s from %s%s" % ("Question" if m.get("kind") == "ask" else "Note",
+                                                                    sname(st, m["sid"]), default_note(m)), "title": m["title"], "ts": m["ts"]})
     for x in st["sessions"].values():
         for e in x.get("entries", []):
             if e["kind"] == "blocker" and not e.get("resolved") and not e.get("supersededBy") and now() - e["ts"] < 7 * 86400:
@@ -3198,6 +3205,84 @@ def needs_block(st, sid):
             "\"...\"</docket-needs-you>" % (len(new), "" if len(new) == 1 else "s", cli(), "\n".join(
                 "- [%s] %s: %s" % (n["id"], n["what"], clip(flag_suspicious(n["title"]), 140)) for n in new[:8]), cli()),
             [n["id"] for n in new])
+
+
+# Defaults for questions to the user: `msg user "..." --default "<what I'll do>"`. When the user hasn't answered by
+# the deadline, docket logs a decision by the asking session (never by the user) and tells it to proceed; the question
+# stays in `needs`, and a later answer reaches the asker as an override. A default never counts as the user's words:
+# it is a decision and a steward message, never a prompt (user_said), a goal, a directive, the constitution or a pause.
+DEFAULT_AFTER_HOURS = _envnum("DOCKET_DEFAULT_AFTER_HOURS", 4)
+DEFAULT_RISKY = re.compile(r"(?i)force[- ]?push|push\s+(?:-f\b|--force)|\bdelet|\bdrop\s+(?:table|database)|\bprod\b|"
+                           r"\bproduction\b|rm\s+-rf|\bbilling\b|\bpayments?\b")
+DEFAULT_USER_ONLY = re.compile(r"(?i)\b(?:goals?|directives?|constitution|pause|resume)\b")
+
+
+def default_refusal(text):
+    """Why a question can't carry a default, or None."""
+    m = DEFAULT_RISKY.search(text)
+    if m:
+        return "Refused --default: %r looks destructive or production-facing; wait for the user's answer." % m.group(0)
+    m = DEFAULT_USER_ONLY.search(text)
+    if m:
+        return "Refused --default: %r is the user's alone to set; a default can't stand in for them." % m.group(0)
+    return None
+
+
+def _dur(secs):
+    h, m = divmod(max(0, round(secs / 60)), 60)
+    return ("%dh %dm" % (h, m) if m else "%dh" % h) if h else "%dm" % m
+
+
+def default_note(m):
+    if not m.get("default"):
+        return ""
+    if m.get("defaulted"):
+        return " (defaulted; answer to override. Default: %s)" % clip(m["default"], 120)
+    return " (defaults in %s to: %s)" % (_dur(m["defaultAt"] - now()), clip(m["default"], 120))
+
+
+def apply_defaults(root, st=None):
+    """Apply every default whose deadline passed with no answer from the user. Returns how many."""
+    st, n = st or load_state(root), 0
+    for m in st.get("msgs", []):
+        if not m.get("default") or m.get("defaulted") or m.get("withdrawn") or now() < m["defaultAt"] or \
+                any(r["re"] == m["id"] and r["sid"] == "user" for r in st["msgs"]):
+            continue
+
+        def guard(fresh, _lock, mid=m["id"]):  # another process applied it first: do nothing
+            if any(x["id"] == mid and x.get("defaulted") for x in fresh.get("msgs", [])):
+                raise Conflict("already applied")
+        waited = _dur(m["defaultAt"] - m["ts"])
+        try:
+            emit(root, _guard=guard, sid=m["sid"], agent="docket-default", kind="decision", wid=m.get("wid"),
+                 defaultFor=m["id"], title=clip("Proceeding on default (user didn't answer in %s): %s" % (waited, m["default"]), 200),
+                 body="Question %s: %s\n\nNot the user's decision: the asking session set this default and docket applied it "
+                      "because the user hadn't answered. The user can still answer to override." % (m["id"], m["title"]))
+        except Conflict:
+            continue
+        ev, st = emit(root, sid="steward", agent="docket-default", kind="msg", to=[m["sid"]], re=m["id"], msgKind="fyi",
+                      defaultFor=m["id"], title=clip("The user didn't answer in %s: proceed on your default (%s)" % (
+                          waited, m["default"]), 200),
+                      body="Your question %s: %s\nThis is your own default, not the user's answer. It stays in their needs "
+                           "list; if they answer later it reaches you as an override." % (m["id"], m["title"]))
+        wake(st, ev)
+        n += 1
+    return n
+
+
+def default_check(root):
+    """Cheap hook path: apply due defaults at most every 5 minutes (one stat), never raising."""
+    f = os.path.join(bdir(root), "defaults.stamp")
+    try:
+        if now() - os.path.getmtime(f) < 300:
+            return
+    except OSError:
+        pass
+    try:
+        open(f, "w").close()
+        apply_defaults(root)
+    except Exception as e:  # never break Claude Code
+        sys.stderr.write("docket: defaults: %s\n" % e)
 
 
 def away_digest(st, since, sid=None):
@@ -3848,6 +3933,9 @@ def main():
                     help="fyi: make them aware; finding: you found the cause; ask: they should investigate (tracked as a pending task)")
     ms.add_argument("--attach", nargs="+", default=[], help="files to hand over, e.g. a build log")
     ms.add_argument("--due", help="ask: when you need the answer, e.g. 30m or 2h (default 1h)")
+    ms.add_argument("--default", help="to the user: what you'll do if they don't answer in time (never for destructive "
+                                      "or production actions)")
+    ms.add_argument("--decide-after", help="with --default: how long the user has, e.g. 90m or 4h (default %gh)" % DEFAULT_AFTER_HOURS)
     po = sub.add_parser("post", help="post a notice to the project board every session sees")
     po.add_argument("title")
     po.add_argument("--pin", action="store_true", help="show it to every new session until unpinned")
@@ -4160,9 +4248,18 @@ def main():
             m_ = re.fullmatch(r"(\d+)\s*([mh]?)", (getattr(a, "due", None) or "60m").strip())
             m_ or sys.exit("--due takes minutes or hours, e.g. 30m or 2h.")
             extra["due"] = now() + int(m_.group(1)) * (3600 if m_.group(2) == "h" else 60)
+        if a.cmd == "msg" and (a.default or a.decide_after):
+            a.default or sys.exit("--decide-after needs --default.")
+            to == ["user"] or sys.exit("--default is only for questions to the user alone (msg user ...).")
+            no = default_refusal(" ".join((a.title, body, a.default)))
+            no and sys.exit(no)
+            m_ = re.fullmatch(r"(\d+)\s*([mh]?)", (a.decide_after or "%dh" % DEFAULT_AFTER_HOURS).strip())
+            m_ or sys.exit("--decide-after takes minutes or hours, e.g. 90m or 4h.")
+            extra.update(default=clip(a.default, 500), defaultAt=now() + int(m_.group(1)) * (3600 if m_.group(2) == "h" else 60))
         ev, st = emit(root, id=mid, sid=sid, agent=a.agent, kind="msg", to=to, title=clip(a.title, 200),
                       body=clip(body, 6000), re=re_, pin=pin, **extra)
-        print("sent %s %s to %s%s%s" % (ev["msgKind"], ev["id"], to_label(st, ev["to"]), " (pinned)" if pin else "",
+        print("sent %s %s to %s%s%s%s" % (ev["msgKind"], ev["id"], to_label(st, ev["to"]), " (pinned)" if pin else "",
+                                         default_note(ev),
                                        "".join("\n  attached %s (%s)" % (f["path"], attach_note(f)) for f in ev.get("files", []))))
         for t in ev["to"]:
             if t.startswith("W-") and not live_sessions(st, t, exclude=sid):
@@ -4386,6 +4483,8 @@ def main():
             print("No metrics yet. Record one: metric <name> key=value ... [--sha] [--box] [--status green|red]")
         return 0
     if a.cmd == "needs":
+        if apply_defaults(root):
+            st = load_state(root)
         rows = needs_user(st)
         for n in rows:
             print("[%s] %s, %s: %s" % (n["id"], n["what"], ago(n["ts"]), n["title"]))
@@ -4397,9 +4496,13 @@ def main():
                      "in their own words (checked against their prompt; --prompt-from <project> if they typed it elsewhere).")
         m = find_msg(st, a.ref)
         if m:
-            ev, st = emit(root, sid="user", kind="msg", to=[m["sid"]], re=m["re"] or m["id"], title=clip(a.title, 200),
-                          body=clip(a.title + ("\n\n" + a.body if a.body else "") if len(a.title) > 200 else a.body, 6000),
-                          msgKind="fyi")
+            body = a.title + ("\n\n" + a.body if a.body else "") if len(a.title) > 200 else a.body
+            if m.get("defaulted"):  # the asker already went ahead on its default: this answer reverses it
+                body = ("OVERRIDE: this reverses the default you proceeded on (%s). Undo or redo what you did on it to "
+                        "match the user's answer.\n\n%s" % (m["default"], body)).strip()
+            ev, st = emit(root, sid="user", kind="msg", to=[m["sid"]], re=m["re"] or m["id"], msgKind="fyi",
+                          title=clip(("Override of your default: " if m.get("defaulted") else "") + a.title, 200),
+                          body=clip(body, 6000))
             wake(st, ev)
             print("answered %s; %s gets it now" % (m["id"], sname(st, m["sid"])))
             return 0
@@ -4464,6 +4567,7 @@ def main():
                 return 0
             rouse_idle(root, st, sent)
             steward(root, st)
+            apply_defaults(root)
     if a.cmd == "assume":
         cands = [x for x, _ in free_identities(st, sid)]
         q = a.who.lower()
