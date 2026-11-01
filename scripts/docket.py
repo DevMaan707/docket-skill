@@ -2049,7 +2049,8 @@ def handle_hook(inp):
         _, st = emit(root, kind="agent_stop", title="%s finished" % who, body=clip(msg, 1500), **E)
         if msg:
             emit(root, kind="output", title="Output of %s" % who, body=clip(msg, 12000), **E)
-        if msg and (typ or "") not in ("Explore", "Plan", "claude-code-guide") and CLAIMS_DONE.search(msg) and not did_work(st, sid, who, inp.get("agent_transcript_path")):
+        spawned = bool((st["sessions"].get(sid, {}).get("agents", {}).get(who) or {}).get("prompt"))  # not Claude Code's own helpers
+        if msg and spawned and (typ or "") not in ("Explore", "Plan", "claude-code-guide") and CLAIMS_DONE.search(msg) and not did_work(st, sid, who, inp.get("agent_transcript_path")):
             emit(root, kind="msg", to=[sid], title="%s reports done but changed no files: verify its claim before relying on it."
                  % who, body="Docket saw no file edits and no test run by it. Its claim: " + clip(msg, 300), **E)
 

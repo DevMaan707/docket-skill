@@ -103,6 +103,9 @@ def main():
         check("a commit naming W-x/ACn marks it DONE? with the sha", "DONE?" in ac and sha in ac, out)
         check("a commit naming a pending pid marks it DONE?", "DONE?" in nl and sha in nl, out)
 
+        run(["hook"], d, stdin=json.dumps(dict(hook_event_name="PreToolUse", session_id="sA", cwd=d, tool_name="Agent",
+            tool_input={"description": "fix it", "prompt": "fix the parser bug", "subagent_type": "general-purpose"})),
+            extra_env=dict(DOCKET_MEM_GUARD="off"))  # spawned by the session, not one of Claude Code's own helpers
         hook(d, "SubagentStart", "sA", agent_id="lazy01", agent_type="general-purpose")
         hook(d, "SubagentStop", "sA", agent_id="lazy01", agent_type="general-purpose",
              last_assistant_message="Implemented the limiter; all tests pass.")
