@@ -467,6 +467,10 @@ def pending_items(st, wid):
         if m.get("kind") == "ask" and wid in m.get("wids", []):
             raw.append({"pid": "A-" + m["id"][:6], "subject": "Asked by %s: %s" % (sname(st, m["sid"]), m["title"]),
                         "source": "message", "sid": m["sid"], "agent": m["agent"], "live": False, "ts": m["ts"]})
+    for c in w.get("criteria", []):  # done-when criteria: frozen, settled by resolve with evidence (or the metric)
+        raw.append({"pid": c["pid"], "subject": "Done when: " + c["text"], "text": c["text"], "source": "criterion",
+                    "sid": c["sid"], "agent": c["agent"], "wid": wid, "ts": c["ts"],
+                    "live": is_live(st["sessions"].get(c["sid"]))})
     groups, order = {}, []
     for it in sorted(raw, key=lambda i: i["ts"]):  # earliest copy is the canonical one
         k = _norm(it["subject"]) or it["pid"]
@@ -495,9 +499,12 @@ def pending_items(st, wid):
                       % (st["sessions"].get(ov["by"], {}).get("name") or ov["by"][:8]))
         else:
             it.update(status="open", by=None, reason="")
+        mc = it["source"] == "criterion" and metric_cond(st, it["text"])
+        if mc and it["status"] != "dropped":  # a metric criterion is met only while the latest metric says so
+            it.update(status="done" if mc[1] else "open", by=None, reason=("met" if mc[1] else "not met") + mc[0])
         passes = [x for p in [it["pid"]] + [c["pid"] for c in it["copies"]] for x in w.get("passes", {}).get(p, [])]
         it["passedBy"] = sorted({x["sid"] for x in passes})
-        if it["status"] == "open" and passes:
+        if it["status"] == "open" and passes and it["source"] != "criterion":
             live = {x["id"] for x in st["sessions"].values() if is_live(x) and x["id"] not in ("user", "manual")}
             if len(it["passedBy"]) >= PASSES_TO_DROP or (live and live <= set(it["passedBy"])):
                 it.update(status="dropped", by=None, reason="no session took it up: " + "; ".join(
@@ -510,17 +517,18 @@ _GITLOG = {}
 
 
 def recent_commits(root):
-    """(sha, subject, ts) of the last week's commits, cached for a minute."""
+    """(sha, subject, ts, body) of the last week's commits, cached for a minute."""
     hit = _GITLOG.get(root)
     if hit and now() - hit[0] < 60:
         return hit[1]
     rows = []
     try:
-        r = subprocess.run(["git", "-C", root, "log", "--since=7.days", "--format=%h%x09%ct%x09%s", "-300"],
+        r = subprocess.run(["git", "-C", root, "log", "--since=7.days", "--format=%h%x09%ct%x09%s%x09%b%x1e", "-300"],
                            capture_output=True, timeout=10)
-        for line in r.stdout.decode(errors="replace").splitlines():
-            sha, ts, subj = (line.split("\t", 2) + ["", ""])[:3]
-            rows.append((sha, subj, float(ts or 0)))
+        for rec in r.stdout.decode(errors="replace").split("\x1e"):
+            if rec.strip():
+                sha, ts, subj, body = (rec.strip("\n").split("\t", 3) + ["", "", ""])[:4]
+                rows.append((sha, subj, float(ts or 0), body))
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
     _GITLOG[root] = (now(), rows)
@@ -528,11 +536,18 @@ def recent_commits(root):
 
 
 def maybe_done(st, it):
-    """A commit since the task appeared whose message shares most of the task's words."""
+    """A commit naming the task (W-0012/AC1, Docket: N-abc123), else one since the task appeared whose
+    message shares most of the task's words."""
+    commits = recent_commits(st.get("root") or ".")
+    ids = [it["wid"] + "/" + it["pid"]] if it.get("source") == "criterion" else [it.get("pid")] + [c["pid"] for c in it.get("copies", [])]
+    for sha, subj, ts, *body in commits:
+        hit = next((x for x in ids if x and re.search(r"(?<![\w/-])%s(?![\w-])" % re.escape(x), subj + "\n" + "".join(body))), None)
+        if hit:
+            return "%s %s (names %s)" % (sha, clip(subj, 70), hit)
     want = set(re.findall(r"[a-z0-9]{4,}", it["subject"].lower())) - {"asked", "session", "unblock"}
     if len(want) < 2:
         return None
-    for sha, subj, ts in recent_commits(st.get("root") or "."):
+    for sha, subj, ts, *_ in commits:
         have = set(re.findall(r"[a-z0-9]{4,}", subj.lower()))
         if ts >= it["ts"] and len(want & have) >= max(2, int(0.5 * len(want))):
             return "%s %s" % (sha, clip(subj, 70))
@@ -551,7 +566,7 @@ def audit(st):
             hrs = (now() - i["ts"]) / 3600
             if i["status"] == "open":
                 md = maybe_done(st, i)
-                old = hrs >= REVIEW_HOURS and not md
+                old = hrs >= REVIEW_HOURS and not md and i["source"] != "criterion"
                 out.append((w["id"], i["pid"], "DONE?" if md else "REVIEW" if old else "NOT DONE", "%s; %s%s" % (
                     i["subject"], "a commit looks like it: %s (resolve with that as evidence if so)" % md if md
                     else "a day old and nobody owns it: adopt it if it still improves things, else pass it" if old
@@ -570,8 +585,9 @@ def audit(st):
 
 
 def find_pending(st, pid):
-    for wid in st["work"]:
-        for it in pending_items(st, wid):
+    scope, _, pid = pid.rpartition("/")  # W-0012/AC1: criteria ids are per item
+    for wid in [scope] if scope else st["work"]:
+        for it in pending_items(st, wid) if wid in st["work"] else []:
             if it["pid"] == pid or pid in [c["pid"] for c in it["copies"]]:
                 return wid, it
     return None, None
@@ -818,6 +834,12 @@ def apply(st, ev):
             w.setdefault("pending", {})[ev["pid"]] = {
                 "status": title, "by": sid, "reason": body, "ts": ts, "subject": ev.get("subject", "")}
             w["updated"] = ts
+    elif kind == "criterion":  # done-when criterion ACn: a pending task on the item until settled with evidence
+        w = work_item(st, ev["wid"])
+        if w:
+            cs = w.setdefault("criteria", [])
+            cs.append({"pid": "AC%d" % (len(cs) + 1), "text": title, "sid": sid, "agent": who, "ts": ts})
+            w["updated"] = ts
     elif kind == "work_type":
         w = work_item(st, ev["wid"])
         if w:
@@ -910,7 +932,7 @@ def apply(st, ev):
     if kind in ENTRY_KINDS and kind not in ("task", "unblock"):
         e = {"id": ev["id"], "ts": ts, "kind": "summary" if kind == "done" else kind,
              "agent": who, "title": title, "body": body, "wid": wid, "sid": sid}
-        for k in ("rejected", "verdict", "evidence", "files", "head", "supersedes",
+        for k in ("rejected", "verdict", "evidence", "files", "head", "supersedes", "scope", "critical",
                   "now", "done", "next", "blocked"):
             if ev.get(k) is not None:
                 e[k] = ev[k]
@@ -1138,6 +1160,25 @@ def needs_review(st, wid, sid):
             and not any(e["kind"] == "review" and e["sid"] in me for e in es))
 
 
+def done_blockers(st, wid):
+    """Why wid can't be marked done yet: unmet done-when criteria, and no sound review by someone
+    other than its builder (the session+agent with the most edited files, else the creator) since the last edit."""
+    w = st["work"][wid]
+    out = ["%s %s: %s" % (i["pid"], i["subject"], i.get("reason") or i["status"]) for i in pending_items(st, wid)
+           if i["source"] == "criterion" and i["status"] not in ("done", "dropped")]
+    eds = [(f["sid"], f.get("agent", "main")) for f in w["files"].values()]
+    bsid, bagent = max(sorted(set(eds)), key=eds.count) if eds else (w.get("createdBy"), "main")
+    last = max([f["ts"] for f in w["files"].values()] or [0])
+    if not any(e["kind"] == "review" and e.get("verdict") == "sound" and not e.get("critical") and e["ts"] >= last
+               and not e.get("supersededBy") and (e["sid"] not in selves(st, bsid) or e["agent"] != bagent)
+               for _, e in all_entries(st, wid)):
+        out.append("no review with verdict sound (and no critical findings) by a session or agent other than its builder "
+                   "(%s, %s) since the last edit. Get one: have another session or a fresh subagent check it against the "
+                   "code, then log review \"<verdict>\" --work %s --verdict sound|partial|wrong -b \"...\""
+                   % (sname(st, bsid), bagent, wid))
+    return out
+
+
 def work_report(root, st, wid):
     """Everything needed to render or check a work item."""
     w = st["work"][wid]
@@ -1221,6 +1262,13 @@ def render_page(root, st, wid):
         sum(1 for e in r["active"] if e["kind"] in ("decision", "summary", "output", "plan")),
         len(r["reviews"])))
     A("")
+    crit = [i for i in pending_items(st, wid) if i["source"] == "criterion"]
+    if crit:
+        A("## Done when")
+        for i in crit:
+            A("- %s **%s** %s  _(%s%s)_" % ({"done": "[x]", "dropped": "[-]"}.get(i["status"], "[ ]"), i["pid"],
+                                           flag_suspicious(i["text"]), i["status"], "; " + i["reason"] if i.get("reason") else ""))
+        A("")
     kids = children(st, wid)
     if kids:
         A("## Sub-items  _(%s)_" % rollup(st, wid))
@@ -1869,9 +1917,12 @@ def handle_hook(inp):
 
     elif event == "SubagentStop":
         msg = inp.get("last_assistant_message")
-        emit(root, kind="agent_stop", title="%s finished" % who, body=clip(msg, 1500), **E)
+        _, st = emit(root, kind="agent_stop", title="%s finished" % who, body=clip(msg, 1500), **E)
         if msg:
             emit(root, kind="output", title="Output of %s" % who, body=clip(msg, 12000), **E)
+        if msg and (typ or "") not in ("Explore", "Plan", "claude-code-guide") and CLAIMS_DONE.search(msg) and not did_work(st, sid, who, inp.get("agent_transcript_path")):
+            emit(root, kind="msg", to=[sid], title="%s reports done but changed no files: verify its claim before relying on it."
+                 % who, body="Docket saw no file edits and no test run by it. Its claim: " + clip(msg, 300), **E)
 
     elif event == "Stop":
         why = keep_going(load_state(root), sid) if who == "main" else None
@@ -1916,6 +1967,24 @@ def handle_hook(inp):
     elif event == "SessionEnd":
         emit(root, kind="session_end", title="Session ended (%s)" % inp.get("reason", ""), **E)
         sync_later(root)
+
+
+# claims of having changed code, not "done" (a research agent is done when it reports)
+CLAIMS_DONE = re.compile(r"\b(?:fixed|implemented|(?:I|we) (?:added|changed|updated|wrote|refactored|patched)|"
+                         r"all tests pass(?:ed|ing)?|tests (?:now )?pass(?:ed)?)\b", re.I)
+TEST_CMD = re.compile(r"\b(?:pytest|unittest|jest|vitest|mocha|rspec|(?:go|cargo|npm|pnpm|yarn|bun|mvn|gradlew?|swift|dotnet) test|"
+                      r"make (?:test|check)|tox|nox|ctest)\b|\btests?/\S+\.py\b|_test\.py\b")
+
+
+def did_work(st, sid, who, transcript):
+    """Did this agent edit a file, or run tests (from its transcript), so its "done" rests on something?"""
+    if any(e.get("kind") == "file" and e["sid"] == sid and e.get("agent") == who for e in st["events"]):
+        return True
+    try:
+        with open(transcript or "", encoding="utf-8", errors="replace") as f:
+            return any(TEST_CMD.search(c) for c in re.findall(r'"command":\s*"((?:[^"\\]|\\.)*)"', f.read()))
+    except OSError:
+        return False
 
 
 def _pending(root, op, sid, typ, desc="", prompt=""):
@@ -1974,7 +2043,8 @@ def inbox(st, sid):
     s, me = st["sessions"].get(sid, {}), selves(st, sid)
     mine = me | {"all", "board", s.get("work")} - {None}
     mine |= {w for w, x in st["work"].items() if any(y["sid"] in me for y in x.get("sessions", []))}  # moved on, still its owner
-    return [m for m in st.get("msgs", []) if m["sid"] not in me and not me & set(m["readBy"])
+    return [m for m in st.get("msgs", []) if (m["sid"] not in me or m["agent"] != "main" and m["to"] == [sid])  # own subagent's note
+            and not me & set(m["readBy"])
             and mine & set(m["to"]) and not (set(m["to"]) <= {"board", "all"} and m["ts"] < s.get("started", 0))]
 
 
@@ -2777,17 +2847,23 @@ GOAL_UNTIL = re.compile(r"^\s*([\w.-]+)\.(\w+)\s*(>=|<=|>|<|==)\s*(-?[\d.]+)\s*$
 def goal_target(st):
     """(text, reached) for a goal set with --until "<metric>.<key> >= N", from the latest metric."""
     g = st.get("goal") or {}
-    m = GOAL_UNTIL.match(g.get("until") or "")
+    mc = metric_cond(st, g.get("until"))
+    return ("target %s%s" % (g["until"], mc[0]), mc[1]) if mc else (None, False)
+
+
+def metric_cond(st, expr):
+    """(", now key=value (...)", met) for "<metric>.<key> <op> N" against the latest metric; None if expr isn't one."""
+    m = GOAL_UNTIL.match(expr or "")
     if not m:
-        return None, False
+        return None
     name, key, op, want = m.group(1), m.group(2), m.group(3), float(m.group(4))
     row = latest_metric(st, name)
     have = row and row["vals"].get(key)
     if not isinstance(have, (int, float)):
-        return "target %s (no %s.%s metric yet: %s metric %s %s=<value>)" % (g["until"], name, key, cli(), name, key), False
+        return " (no %s.%s metric yet: %s metric %s %s=<value>)" % (name, key, cli(), name, key), False
     hit = {">=": have >= want, "<=": have <= want, ">": have > want, "<": have < want, "==": have == want}[op]
-    return "target %s, now %s=%s (%s ago%s)" % (g["until"], key, have, ago(row["ts"]).replace(" ago", ""),
-                                               ", at " + row["sha"][:9] if row["sha"] else ""), hit
+    return ", now %s=%s (%s ago%s)" % (key, have, ago(row["ts"]).replace(" ago", ""),
+                                       ", at " + row["sha"][:9] if row["sha"] else ""), hit
 
 
 def open_asks(st, sid=None):
@@ -3251,6 +3327,8 @@ def main():
     lg.add_argument("--verdict", choices=["sound", "partial", "wrong", "unverified"], help="review")
     lg.add_argument("--confirmed", dest="hyp", action="store_const", const="confirmed", help="hypothesis: tested and true")
     lg.add_argument("--refuted", dest="hyp", action="store_const", const="refuted", help="hypothesis: tested and false")
+    lg.add_argument("--scope", choices=["plan", "diff", "qa"], help="review: what was checked")
+    lg.add_argument("--critical", type=int, default=0, help="review: critical findings (>0 doesn't count as sound for closing)")
     lg.add_argument("--supersedes", help="id(s) of earlier entries this corrects, comma-separated")
     lg.add_argument("--expect", help="rev you last read; refuse if others changed the item since")
     for k in ("now", "done", "next", "blocked"):
@@ -3267,7 +3345,12 @@ def main():
     wn.add_argument("--type", choices=WORK_TYPES, help="inferred from the title if omitted")
     wn.add_argument("--top-level", action="store_true", help="skip the related-item suggestion")
     wn.add_argument("--blocked-by", default="", help="comma-separated work items that must close first")
+    wn.add_argument("--done-when", action="append", default=[], help="acceptance criterion (repeatable; may be a metric: sast.fn<=0)")
     wn.add_argument("--session", **sess)
+    wac = wsub.add_parser("accept", help="add done-when criteria to a work item")
+    wac.add_argument("wid")
+    wac.add_argument("--done-when", action="append", required=True)
+    wac.add_argument("--session", **sess)
     wb = wsub.add_parser("block", help="W-a can't start until W-b is closed")
     wb.add_argument("wid")
     wb.add_argument("--on", required=True)
@@ -3318,6 +3401,8 @@ def main():
     ws.add_argument("wid")
     ws.add_argument("status", choices=["open", "done", "abandoned", "superseded", "parked"])
     ws.add_argument("--expect", help="rev you last read; refuse if others changed the item since")
+    ws.add_argument("--force", action="store_true", help="done despite unmet criteria or no review (needs --reason)")
+    ws.add_argument("--reason", default="")
     ws.add_argument("--session", **sess)
     wsub.add_parser("list")
     wp = wsub.add_parser("park", help="sink stale items to the bottom, out of audits and sweeps; attach or status open brings one back")
@@ -3580,6 +3665,11 @@ def main():
             bad += f["trust"] != "verified"
             print("  %s %s  (id %s)%s" % (mark, f["title"], f["id"],
                   "  changed: " + ", ".join(f["changedFiles"]) if f["changedFiles"] else ""))
+        for e in r["reviews"]:  # a review vouches for the code as it was: stale once those files change
+            changed = [p for p, h in (e.get("files") or {}).items() if file_hash(root, p) != h]
+            bad += bool(changed)
+            if changed:
+                print("  STALE review %s (%s, id %s)  changed: %s" % (e["title"], e.get("verdict", "?"), e["id"], ", ".join(changed)))
         for fl in r["files"]:
             if fl["changed"]:
                 print("  file %s %s since this work last touched it" % (
@@ -4000,6 +4090,7 @@ def main():
             sys.exit("resolve needs --reason with the evidence it's done (a commit, a test or gate result, a file:line), "
                      "so nobody has to redo the check.")
         status = {"adopt": "adopted", "resolve": "done", "drop": "dropped", "reopen": "reopened", "pass": "passed"}[a.cmd]
+        a.pids = ["%s/%s" % (st["sessions"].get(sid, {}).get("work"), p) if re.match(r"AC\d+$", p) else p for p in a.pids]
         if a.cmd == "adopt":  # critique before following: no adopting unreviewed work
             for wid in {find_pending(st, p)[0] for p in a.pids} - {None}:
                 if needs_review(st, wid, sid):
@@ -4012,6 +4103,11 @@ def main():
             wid, it = find_pending(st, pid)
             if not it:
                 print("  %s: not found" % pid)
+                continue
+            if it["source"] == "criterion" and a.cmd in ("drop", "pass") and not (
+                    it["sid"] in selves(st, sid) or (not a.session and "CLAUDECODE" not in os.environ)):
+                print("  %s: done-when criteria are frozen; only %s (who set it) or the user can drop it"
+                      % (pid, sname(st, it["sid"])))
                 continue
             if a.cmd == "adopt" and it["status"] == "active" and it.get("by") != sid:
                 print("  %s: active in live session %s; coordinate instead of taking it"
@@ -4056,6 +4152,8 @@ def main():
                     return 2
             ev, st = emit(root, sid=sid, kind="work_new", wid="__new__", title=clip(a.title, 120),
                           keywords=kws, head=git_head(root), parent=parent, type=a.type)
+            for c in a.done_when:
+                _, st = emit(root, sid=sid, kind="criterion", wid=ev["wid"], title=clip(c, 300))
             w = st["work"][ev["wid"]]
             for b in [x for x in a.blocked_by.split(",") if x.strip()]:
                 on = resolve_wid(st, b.strip())
@@ -4063,6 +4161,13 @@ def main():
                     _, st = emit(root, sid=sid, kind="work_block", wid=ev["wid"], on=on)
             print("created %s (%s) %s; this session is attached to it" % (
                 ev["wid"], w["type"], breadcrumb(st, ev["wid"])))
+            for c in w.get("criteria", []):
+                print("  %s/%s  done when: %s" % (w["id"], c["pid"], c["text"]))
+        elif a.wcmd == "accept":
+            wid = resolve_wid(st, a.wid) or sys.exit("No such work item: %s" % a.wid)
+            for c in a.done_when:
+                _, st = emit(root, sid=sid, kind="criterion", wid=wid, title=clip(c, 300))
+                print("  %s/%s  done when: %s" % (wid, st["work"][wid]["criteria"][-1]["pid"], c))
         elif a.wcmd == "block":
             wid = resolve_wid(st, a.wid) or sys.exit("No such work item: %s" % a.wid)
             on = resolve_wid(st, a.on) or sys.exit("No such work item: %s" % a.on)
@@ -4121,7 +4226,20 @@ def main():
             print("%d item(s)%s. Bring one back with: work status <id> open" % (len(pick), "" if pick else " to park"))
         elif a.wcmd == "status":
             wid = resolve_wid(st, a.wid) or sys.exit("No such work item: %s" % a.wid)
-            _, st = emit(root, _guard=expect_guard(wid, a.expect, sid), sid=sid, kind="work_status", wid=wid, title=a.status)
+            if a.force and not a.reason:
+                sys.exit("--force needs --reason, so the next session knows why it closed unverified.")
+            exp = expect_guard(wid, a.expect, sid)
+            def guard(st_, lock):  # done means done: decided under the lock, after the rev check
+                exp(st_, lock)
+                why = done_blockers(st_, wid) if a.status == "done" and not a.force else []
+                if why:
+                    sys.exit("%s can't be marked done yet:\n%s\nOverride (logged as a decision): work status %s done "
+                             "--force --reason \"...\"" % (wid, "\n".join("  - " + x for x in why), wid))
+            forced = a.status == "done" and a.force and done_blockers(st, wid)
+            _, st = emit(root, _guard=guard, sid=sid, kind="work_status", wid=wid, title=a.status)
+            if forced:
+                _, st = emit(root, sid=sid, kind="decision", wid=wid, title="Closed %s without meeting its bar" % wid,
+                             body=clip(a.reason + "\n\nNot met:\n" + "\n".join("- " + x for x in forced), 4000))
             print("%s is now %s" % (wid, a.status))
             left = [i for i in pending_items(st, wid) if i["status"] in ("open", "adopted", "active")]
             if a.status == "done" and left:
@@ -4154,6 +4272,10 @@ def main():
         ev["verdict"] = a.hyp
     if a.kind == "hypothesis" and a.evidence:
         ev["evidence"] = clip(a.evidence, 500)
+    if a.kind == "review":  # pin the review to the code it saw; check reports it STALE once that changes
+        rw = st["work"].get(wid or st["sessions"].get(sid, {}).get("work") or "")
+        ev.update(head=git_head(root), files={p: file_hash(root, p) for p in (rw or {}).get("files", {})})
+        ev.update({k: v for k, v in (("scope", a.scope), ("critical", a.critical)) if v})
     if a.kind == "brief":
         for k in ("now", "done", "next", "blocked"):
             if getattr(a, k):

@@ -251,6 +251,19 @@ $B board                                           # pinned notices and recent p
 - **Commit only your own files.** A `git commit` that takes a file another live session holds is
   refused.
 - **Done needs evidence.** `resolve <task> --reason "<commit, test or gate result, file:line>"`.
+- **Say what done means, up front.** `work new "..." --done-when "429 after 5 tries" --done-when
+  "sast.fn<=0"` (or `work accept W-xxxx --done-when "..."` later). Each becomes task `W-xxxx/AC1`, … at
+  the top of the page; resolve it with evidence. A metric criterion is met only while the latest metric
+  satisfies it. Criteria are frozen: only the session that set one, or the user, can drop it.
+- **Done means done.** `work status W-xxxx done` is refused while a criterion is unmet, or until a
+  session or agent other than the item's builder has logged `review ... --work W-xxxx --verdict sound`
+  since the last edit (`--critical N` > 0 doesn't count). `--force --reason "..."` overrides and is
+  logged as a decision. Reviews record HEAD and the files' hashes (`--scope plan|diff|qa`); `check`
+  calls them STALE once those files change.
+- **Name the task in the commit.** `Docket: W-0012/AC1` (or a task id like `N-abc123`) in a commit
+  message marks it `DONE?` with that sha; then resolve it with the commit as evidence.
+- **Verify agents' "done".** A subagent that reports success but edited no files and ran no tests is
+  flagged to you: check its claim before relying on it.
 - **Log dead ends.** `$B log deadend "LRU cache for the scanner" -b "no gain: hit rate 3%"`. The
   work page lists them, so nobody retries them without a new reason.
 - **The user can message you too.** A `msg` typed in a terminal, or copied from the journal's Board
