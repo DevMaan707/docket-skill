@@ -698,7 +698,7 @@ def apply(st, ev):
     title, body = ev.get("title", ""), ev.get("body", "")
     wid = ev.get("wid") or s.get("work")
 
-    if ev.get("pid"):
+    if isinstance(ev.get("pid"), int):  # a Claude process id; task events reuse "pid" for task ids
         s["pid"], s["host"] = ev["pid"], ev.get("host")
     if kind in PROGRESS_KINDS:  # what counts as doing something, for the goal's keep-going
         s["progressTs"] = ts

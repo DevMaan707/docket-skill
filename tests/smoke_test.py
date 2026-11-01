@@ -838,6 +838,10 @@ def main():
         _, out = run(["work", "list"], d)
         check("attaching to a parked item brings it back", re.search(p2 + r".*open", out) is not None, out[-400:])
 
+        stp = json.load(open(os.path.join(d, ".docket", "state.json")))
+        check("a session's process id is never overwritten by a task id",
+              all(isinstance(v.get("pid"), (int, type(None))) for v in stp["sessions"].values()),
+              str({k: v.get("pid") for k, v in stp["sessions"].items() if not isinstance(v.get("pid"), (int, type(None)))}))
         before = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
         run(["rebuild"], d)
         after = open(os.path.join(d, ".docket", "state.json"), encoding="utf-8").read()
