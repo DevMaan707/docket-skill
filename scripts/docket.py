@@ -746,7 +746,7 @@ def apply(st, ev):
              "note": body, "sid": sid, "ts": ts})
         st["metrics"][title] = st["metrics"][title][-20:]
         if title == "tokens":  # per-Stop usage from the transcript; the session keeps its running total
-            s["tokens"] = s.get("tokens", 0) + sum(v for v in (ev.get("vals") or {}).values() if isinstance(v, (int, float)))
+            s["tokens"] = s.get("tokens", 0) + new_tokens(ev.get("vals"))
     elif kind == "work_block":
         w = work_item(st, ev["wid"])
         if w:
@@ -3146,6 +3146,11 @@ def read_tokens(root, sid, path):
     return vals if sum(vals.values()) else None
 
 
+def new_tokens(vals):
+    """Tokens a turn actually added: cache reads re-read the same context every turn and would swamp the total."""
+    return sum(v for k, v in (vals or {}).items() if k != "cache_read" and isinstance(v, (int, float)))
+
+
 def ktok(n):
     return "%.1fM" % (n / 1e6) if n >= 1e6 else "%dk" % (n // 1000)
 
@@ -3190,7 +3195,7 @@ def retro(root, st, days):
         elif k == "goal_continue":
             bump(sid, "keep-going turns")
         elif k == "metric" and ev.get("title") == "tokens":
-            bump(sid, "tokens", sum(v for v in (ev.get("vals") or {}).values() if isinstance(v, (int, float))))
+            bump(sid, "tokens", new_tokens(ev.get("vals")))
         elif k == "blocker":
             bump(sid, "blockers")
             u = next((x for x in evs[i + 1:] if x.get("kind") == "unblock" and (
