@@ -254,10 +254,12 @@ docket board                                           # pinned notices and rece
   for that setting or a listener. `docket who` shows each session's wake: socket, listener or
   unknown.
 - **Nobody idles while the goal is open.** While an autonomous goal is open, a background waker
-  checks every 5 minutes. A session idle for 20 minutes is woken, at most every 30, and told to
+  checks every 5 minutes. A session idle for 20 minutes (`docket idle N` changes it; 0 turns it off)
+  is woken, at most every 1.5x that, and told to
   carry on in its lane or take work (`ready`, `audit`). Sessions that said they're waiting (`wait`),
   are blocked, or are paused are left alone. When woken, act: don't reply "nothing to do" without
-  checking `ready` and `audit` first.
+  checking `ready` and `audit` first. Docket already does this sweep, so the user needs no loop of
+  their own to check on idle sessions; point them to `docket idle N` instead.
 - **Asks have a deadline.** `msg <to> "..." --kind ask --due 30m` (the default is 1h). An ask still
   unanswered after its deadline keeps its recipient from going idle until it replies, even if only
   to say when it can. `docket asks` lists the open asks.
@@ -357,7 +359,13 @@ The lead is the session the user talks to most: the live one with the most promp
 the last day (docket's own `[docket]` wake-ups don't count). When there's no lead yet (a fresh
 project, the user just described an idea), `docket lead` claims it. Nobody can take it from the
 session the user is talking to. Docket shows each session its role in a `<docket-role>` block at
-start and whenever the role or the aim changes.
+start and whenever the role or the aim changes. With no aim recorded, the user's standing goal
+(section 4c) is the confirmed aim: it's already their own words; `aim set` only refines it.
+
+The session the user talks to most (the hub) can hand the lead to another session that coordinates:
+`docket lead "<session name|id>"` (the current lead can too; `docket lead` alone takes it back). That
+session leads while it's live, then the rule above applies again. The hub gets a short note instead
+of the member charter: relay the user's words to the lead and answer what it escalates.
 
 - **The lead** gets the product-owner charter. It reads the code and record first, interviews the
   user one question at a time (each with its own guess), and stops when it could predict the next
