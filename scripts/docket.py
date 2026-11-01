@@ -793,7 +793,7 @@ def apply(st, ev):
     elif kind == "work_status":
         w = work_item(st, ev["wid"])
         if w:
-            w["status"], w["updated"] = title, ts
+            w["status"], w["updated"], w["statusTs"] = title, ts, ts
     elif kind == "work_move":
         w, p = work_item(st, ev["wid"]), ev.get("parent")
         if w and (p is None or (p in st["work"] and p != w["id"]
@@ -2441,7 +2441,7 @@ def stale_brief(st, sid):
     or when the item you're filed under is closed or parked while you keep working."""
     s = st["sessions"].get(sid, {})
     w = st["work"].get(s.get("work") or "")
-    if w and w["status"] != "open" and s.get("progressTs", 0) - w["updated"] > 600:
+    if w and w["status"] != "open" and s.get("progressTs", 0) - w.get("statusTs", 0) > 600:
         return ("<docket>You are filed under %s (%s), which is %s, but you keep working: your updates land in the "
                 "wrong place. Attach to the item you're actually on (%s work attach W-xxxx --session %s, or work new), "
                 "then rewrite your brief there.</docket>" % (w["id"], clip(w["title"], 80), w["status"], cli(), sid))

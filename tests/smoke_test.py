@@ -705,7 +705,7 @@ def main():
         shutil.rmtree(os.path.join(d, ".docket", "tidy"), ignore_errors=True)  # earlier hooks already checked
         n1, n2 = dk2.tidy_nudge(d, sw, st_), dk2.tidy_nudge(d, sw, st_)
         check("a stale brief is nudged mid-turn, then not again for a while", n1 and "brief" in n1 and n2 is None, str(n1))
-        st_["work"][st_["sessions"][sw]["work"]].update(status="parked", updated=time.time() - 3600)
+        st_["work"][st_["sessions"][sw]["work"]].update(status="parked", statusTs=time.time() - 3600, updated=time.time())
         n3 = dk2.stale_brief(st_, sw)
         check("a session still working under a parked item is told to re-file", n3 and "parked" in n3 and "work attach" in n3, str(n3))
         # a day-old task goes up for review; once two sessions pass on it, it's removed
