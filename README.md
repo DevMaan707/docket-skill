@@ -187,6 +187,11 @@ adopts it or votes `pass <id> --reason`; after two passes (or every live session
 A cleared session keeps its identity: the same Claude process gets a new session id, and docket
 hands it the old name, work item, lanes, leases and mail, plus a resume block with its last brief.
 
+Close a session and open a new one, and the new one offers to take over the closed identity
+(`assume "<name>"`). It then answers to that name, continues its work and gets its mail; or you
+start a fresh identity instead. While an autonomous goal is open, a background waker wakes any
+session idle for 20 minutes (`DOCKET_ROUSE=off` disables it).
+
 ## The record is in git
 
 Like [git-bug](https://github.com/git-bug/git-bug) and GitLoom, the record lives in git:

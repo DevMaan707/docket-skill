@@ -699,7 +699,9 @@ def apply(st, ev):
         o = st["sessions"].get(ev.get("ref"))
         if o and o["id"] != sid:
             s["prev"] = o.get("prev", []) + [o["id"]]
-            s["name"], o["name"] = s["name"] or o["name"], (o["name"] + " (before /clear)") if o["name"] else ""
+            how = ev.get("how") or "before /clear"
+            s["name"] = o["name"] if how != "before /clear" else s["name"] or o["name"]
+            o["name"] = "%s (%s)" % (o["name"], how) if o["name"] else ""
             s["work"], s["goalSeen"], s["dirSeen"] = o["work"], o.get("goalSeen"), list(o.get("dirSeen", []))
             w = st["work"].get(o["work"] or "")
             if w and sid not in [x["sid"] for x in w["sessions"]]:
@@ -708,6 +710,7 @@ def apply(st, ev):
                 if l.get("sid") == o["id"]:
                     l["sid"] = sid
             o["status"], o["next"] = "ended", sid
+            s["handedOver"] = how != "before /clear"
     elif kind == "sweep":
         s["sweepTs"] = ts
     elif kind == "pause":
@@ -1625,6 +1628,7 @@ def handle_hook(inp):
                 o = max(olds, key=lambda x: x["last"])
                 _, st = emit(root, kind="succeed", ref=o["id"], title="Continues %s after /clear" % sname(st, o["id"]), **E)
                 resumed = resume_block(st, sid, o)
+        ident = identity_block(st, sid) if inp.get("source", "startup") == "startup" else None
         digest = None if st["sessions"].get(sid, {}).get("work") else open_work_digest(root, st, sid)
         g = goal_block(st)
         if g:
@@ -1632,7 +1636,8 @@ def handle_hook(inp):
         dv = directives_block(st)
         if dv:
             emit(root, kind="directive_seen", ids=[d_["id"] for d_ in directives(st)], title="Read the directives", **E)
-        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), resumed, team_block(st, sid), dv, g,
+        start_rouser(root, st)
+        hook_output(event, "\n".join(x for x in (context_for(root, sid, "main"), resumed, ident, team_block(st, sid), dv, g,
                                                   pinned_block(st), digest) if x))
         sync_later(root)  # pull what other machines pushed
 
@@ -1810,6 +1815,7 @@ def handle_hook(inp):
             return
         if who == "main" and not inp.get("stop_hook_active") and os.environ.get("DOCKET_LISTEN") != "off":
             st = load_state(root)
+            start_rouser(root, st)
             late = deliver(root, sid, st)  # arrived while this turn was finishing
             due = [m for m in open_asks(st, sid) if now() > ask_due(m)]
             mine = duties(st, sid) if not late and not st.get("paused") and os.environ.get("DOCKET_SWEEP") != "off" else []
@@ -2157,6 +2163,64 @@ def keep_going(st, sid):
             "waiting on a job, say so (%s wait \"<what>\" --minutes N) and stop. If truly blocked, log a blocker and "
             "stop. If the goal is met: %s goal met -b \"<evidence>\". (Continuation %d of %d.)"
             % (c, c, c, s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
+
+
+IDLE_WAKE_SECS, REWAKE_SECS = 1200, 1800
+
+
+def rouse_idle(root, st, sent):
+    """While an autonomous goal is open, wake sessions that have sat idle for 20 minutes (each at most every
+    30): the Stop hook only pushes a session as it stops, so without this an idle one stays idle.
+    `sent` maps session id -> when we last woke it. Returns who was woken."""
+    g = st.get("goal")
+    if not (g and g["status"] == "active" and g["autonomous"]) or st.get("paused") \
+            or memory(root)["level"] == "critical":
+        return []
+    out, c = [], cli()
+    for x in st["sessions"].values():
+        if x["id"] in ("user", "manual") or x["status"] == "ended" or x.get("next") or not x.get("sock") \
+                or x.get("host") != socket.gethostname() or process_gone(x):
+            continue
+        if now() - x["last"] < IDLE_WAKE_SECS or now() - sent.get(x["id"], 0) < REWAKE_SECS \
+                or x.get("waitUntil", 0) > now():
+            continue
+        if any(e["kind"] == "blocker" and not e.get("resolved") and e["ts"] >= x.get("promptTs", 0)
+               for e in x.get("entries", [])):
+            continue  # it said why it can't go on; an answer to the blocker wakes it
+        lane = [l["name"] for l in st.get("lanes", {}).values() if l["sid"] == x["id"]]
+        todo = ("carry on in your lane (%s): your brief's next step, then %s audit for tasks assigned to you" % (
+            ", ".join(lane), c) if lane else "take work: %s ready, the REVIEW and NOT DONE tasks in %s audit, or ask the "
+            "lead on the goal thread for a lane" % (c, c))
+        n = wake(st, {"sid": "rouser", "to": [x["id"]]}, "[docket] The user's standing goal is open and you've been idle "
+                 "%d min. Don't wait to be asked: read your inbox (%s inbox --session %s), then %s. If you are waiting on "
+                 "a job, say so with %s wait \"<what>\" --minutes N; if blocked, log a blocker." % (
+                     (now() - x["last"]) // 60, c, x["id"], todo, c))
+        if n:
+            sent[x["id"]] = now()
+            out.append(x["id"])
+    return out
+
+
+def start_rouser(root, st):
+    """One background `rouse` loop per project, started by any session's hooks while an autonomous goal is open."""
+    g = st.get("goal")
+    if os.environ.get("DOCKET_ROUSE") == "off" or not (g and g["status"] == "active" and g["autonomous"]) \
+            or os.name == "nt":
+        return
+    f = os.path.join(bdir(root), "rouse.pid")
+    try:
+        os.kill(int(open(f).read().strip()), 0)
+        return  # already running
+    except (OSError, ValueError):
+        pass
+    try:
+        p = subprocess.Popen([sys.executable, SCRIPT, "rouse"], cwd=root, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                             env=dict(os.environ, DOCKET_ROOT=root))
+        with open(f, "w") as fh:
+            fh.write(str(p.pid))
+    except OSError:
+        pass
 
 
 def is_heavy(cmd):
@@ -2727,12 +2791,40 @@ def similar_agents(st, sid, text):
     return hits
 
 
+def free_identities(st, sid):
+    """Closed sessions (ended, or their Claude process is gone) whose identity nobody took over yet."""
+    out = []
+    for x in st["sessions"].values():
+        if x["id"] in (sid, "user", "manual") or x.get("next") or now() - x["last"] > 7 * 86400:
+            continue
+        lanes = [l["name"] for l in st.get("lanes", {}).values() if l["sid"] == x["id"]]
+        if (x.get("name") or x.get("work") or lanes) and (x["status"] == "ended" or process_gone(x)):
+            out.append((x, lanes))
+    return sorted(out, key=lambda t: -t[0]["last"])[:6]
+
+
+def identity_block(st, sid):
+    free = free_identities(st, sid)
+    if not free:
+        return None
+    rows = ["- %s (%s): %s%s, last active %s" % (
+        x.get("name") or "unnamed", x["id"][:8], "%s %s" % (x["work"], clip(st["work"][x["work"]]["title"], 60))
+        if x.get("work") in st["work"] else "no work item", "; lanes: " + ", ".join(lanes) if lanes else "", ago(x["last"]))
+        for x, lanes in free]
+    return ("<docket-identities>These sessions are closed and their identities are free to take over:\n%s\n"
+            "Before you start, ask the user one question (AskUserQuestion): continue as one of these, or start a new "
+            "identity? Taking one over gives you its name, work item, lanes and leases, and every message sent to it, "
+            "now or later, reaches you: %s assume <name or id> --session %s. New identity: %s name \"<2-5 words>\" "
+            "--session %s.</docket-identities>" % ("\n".join(rows), cli(), sid, cli(), sid))
+
+
 def resume_block(st, sid, o):
     s, c = st["sessions"][sid], cli()
     lanes = [l["name"] for l in st.get("lanes", {}).values() if l["sid"] == sid]
     b = o.get("brief") or {}
-    out = ["<docket-resume>The context was cleared, but you are the same session: you continue %s (%s)."
-           % (s["name"] or "session " + o["id"][:8], o["id"][:8])]
+    out = ["<docket-resume>%s: you continue %s (%s)." % (
+        "You took over this identity" if s.get("handedOver") else "The context was cleared, but you are the same session",
+        s["name"] or "session " + o["id"][:8], o["id"][:8])]
     if s["work"]:
         out.append("Your work item: %s, %s. Read it first: %s show %s" % (
             s["work"], st["work"][s["work"]]["title"], c, s["work"]))
@@ -3155,6 +3247,10 @@ def main():
     sub.add_parser("resume", help="the user resumes every session")
     sub.add_parser("statusline", help="one line for Claude Code's status line (reads its JSON on stdin)")
     sub.add_parser("relaunch", help="commands to reopen every recent session with its own identity")
+    sub.add_parser("rouse", help="(started by the hooks) wake idle sessions while an autonomous goal is open")
+    asm = sub.add_parser("assume", help="take over a closed session's identity: its name, work, lanes and mail")
+    asm.add_argument("who", help="the closed session's name or id")
+    asm.add_argument("--session", **sess)
     sub.add_parser("ready", help="work nobody is on whose blockers are closed: pick from here when idle")
     ls_ = sub.add_parser("listen", help="wait for mail (run in the background): exits when a message arrives, waking you")
     ls_.add_argument("--hours", type=float, default=12)
@@ -3582,6 +3678,31 @@ def main():
                   "brief, start nothing new, and stop." % (": " + a.why if getattr(a, "why", "") else "") if a.cmd == "pause" else
                   "[docket] The user resumed every session. Continue from your brief and your task list.")
         print("%s; told %d live session%s" % ("paused" if a.cmd == "pause" else "resumed", n_, "" if n_ == 1 else "s"))
+        return 0
+    if a.cmd == "rouse":  # ponytail: polls every 5 min; exits once the goal ends or no session can be woken for an hour
+        sent, quiet = {}, now()
+        while True:
+            time.sleep(300)
+            st = load_state(root)
+            g = st.get("goal")
+            if not (g and g["status"] == "active" and g["autonomous"]):
+                return 0
+            if any(x.get("sock") and x["status"] != "ended" and not process_gone(x) for x in st["sessions"].values()):
+                quiet = now()
+            elif now() - quiet > 3600:
+                return 0
+            rouse_idle(root, st, sent)
+    if a.cmd == "assume":
+        cands = [x for x, _ in free_identities(st, sid)]
+        q = a.who.lower()
+        o = next((x for x in cands if x["id"].startswith(a.who) or (x.get("name") or "").lower() == q), None)
+        if not o:
+            live = next((x for x in st["sessions"].values() if x["id"].startswith(a.who) or (x.get("name") or "").lower() == q), None)
+            sys.exit("%s is still running, so its identity isn't free; message it instead." % sname(st, live["id"]) if live
+                     and not live.get("next") else "No closed session called %s. Free ones: %s" % (
+                         a.who, ", ".join("%s (%s)" % (x.get("name") or "unnamed", x["id"][:8]) for x in cands) or "none"))
+        _, st = emit(root, sid=sid, kind="succeed", ref=o["id"], how="handed over", title="Took over %s" % sname(st, o["id"]))
+        print(resume_block(st, sid, o).replace("<docket-resume>", "").replace("</docket-resume>", ""))
         return 0
     if a.cmd == "relaunch":
         rows = [x for x in st["sessions"].values() if x["id"] not in ("user", "manual") and not x.get("next")

@@ -31,6 +31,7 @@ def run(args, cwd, session=None, stdin=None, pid=None, agent=True, extra_env=Non
     env.pop("DOCKET_ROOT", None)
     env.pop("CLAUDECODE", None)
     env.setdefault("DOCKET_NOTIFY", "off")  # no desktop notifications from tests
+    env.setdefault("DOCKET_ROUSE", "off")  # no background waker from tests
     env.setdefault("DOCKET_LISTEN", "off")  # only the listener test turns the Stop-hook listener nudge on
     if agent:
         env["CLAUDECODE"] = "1"  # as if a Claude Code agent ran it
@@ -708,6 +709,47 @@ def main():
         st_["work"][st_["sessions"][sw]["work"]].update(status="parked", statusTs=time.time() - 3600, updated=time.time())
         n3 = dk2.stale_brief(st_, sw)
         check("a session still working under a parked item is told to re-file", n3 and "parked" in n3 and "work attach" in n3, str(n3))
+        # a new session can take over a closed session's identity, and its mail
+        hook(d, "SessionStart", "sIdOld"); hook(d, "UserPromptSubmit", "sIdOld", prompt="own the exporter please")
+        run(["name", "Exporter lead"], d, "sIdOld")
+        run(["work", "new", "Exporter v2", "-k", "exporterv2", "--top-level"], d, "sIdOld")
+        hook(d, "SessionEnd", "sIdOld")
+        ctx = run(["hook"], d, stdin=json.dumps(dict(hook_event_name="SessionStart", session_id="sIdNew", cwd=d, source="startup")))[1]
+        check("a new session is offered the closed identities to take over", "docket-identities" in ctx and "Exporter lead" in ctx
+              and "AskUserQuestion" in ctx, ctx[-700:])
+        code, out = run(["assume", "Gate speed"], d, "sIdNew")
+        check("a running session's identity can't be taken", code != 0 and "still running" in out, out)
+        code, out = run(["assume", "Exporter lead"], d, "sIdNew")
+        run(["msg", "Exporter lead", "Ship the v2 exporter today"], d, "sM2")
+        run(["msg", "sIdOld", "Also add a CSV header"], d, "sM2")
+        _, ib = run(["inbox"], d, "sIdNew")
+        check("taking over brings the name, work and every message to it, by name or old id",
+              code == 0 and "Exporter v2" in out and "Ship the v2 exporter" in ib and "CSV header" in ib, out + ib)
+        ctx = run(["hook"], d, stdin=json.dumps(dict(hook_event_name="SessionStart", session_id="sIdNew2", cwd=d, source="startup")))[1]
+        check("a taken identity isn't offered again", "Exporter lead" not in ctx.split("docket-identities")[-1][:600] if "docket-identities" in ctx else True, ctx[-500:])
+
+        # while the autonomous goal is open, idle sessions are woken, each at most every 30 min
+        srv2p = os.path.join(tempfile.mkdtemp(prefix="dk-"), "in.sock")
+        srv2 = socket_.socket(socket_.AF_UNIX); srv2.bind(srv2p); srv2.listen(5); srv2.settimeout(10)
+        got2 = []
+        def serve2():
+            try:
+                c, _ = srv2.accept(); got2.append(c.recv(65536).decode()); c.close()
+            except OSError:
+                pass
+        th2 = threading.Thread(target=serve2); th2.start()
+        st_ = dk2.load_state(d)
+        st_["goal"] = {"status": "active", "autonomous": True, "id": "g"}
+        st_["paused"] = None
+        for k, v in st_["sessions"].items():
+            v["sock"] = ""
+        st_["sessions"]["sM1"].update(sock=srv2p, host=socket_.gethostname(), pid=os.getpid(), status="idle",
+                                       last=time.time() - 3600, waitUntil=0, entries=[])
+        sent = {}
+        w1 = dk2.rouse_idle(d, st_, sent); th2.join(12); srv2.close()
+        w2 = dk2.rouse_idle(d, st_, sent)
+        check("an idle session is woken while the goal is open, and not again right away",
+              w1 == ["sM1"] and got2 and "idle" in got2[0] and w2 == [], str(w1) + str(w2) + str(got2))
         # a day-old task goes up for review; once two sessions pass on it, it's removed
         st_ = json.load(open(os.path.join(d, ".docket", "state.json")))
         for s_ in st_["sessions"].values():

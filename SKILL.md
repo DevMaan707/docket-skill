@@ -225,6 +225,11 @@ $B board                                           # pinned notices and recent p
   stop (never `&` or `> /dev/null`); the Stop hook reminds you. A session in bypass-permissions
   mode holds these nudges for the user's approval unless its `crossSessionInbound` setting is
   `accept`.
+- **Nobody idles while the goal is open.** While an autonomous goal is open, a background waker
+  checks every 5 minutes. A session idle for 20 minutes is woken, at most every 30, and told to
+  carry on in its lane or take work (`ready`, `audit`). Sessions that said they're waiting (`wait`),
+  are blocked, or are paused are left alone. When woken, act: don't reply "nothing to do" without
+  checking `ready` and `audit` first.
 - **Asks have a deadline.** `msg <to> "..." --kind ask --due 30m` (the default is 1h). An ask still
   unanswered after its deadline keeps its recipient from going idle until it replies, even if only
   to say when it can. `$B asks` lists the open asks.
@@ -334,6 +339,12 @@ other work just see the goal. `DOCKET_GOAL_STOP=off` turns the keep-going off.
 name, work item, lanes, leases and mail, and gets a `<docket-resume>` block with your last brief.
 Read your work item (`show W-xxxx`) and `audit` before carrying on, and check your own old notes
 against the code like anyone else's.
+
+**A new session can take over a closed one.** When sessions are closed, a new session's start
+context lists their free identities in `<docket-identities>`. Ask the user once (AskUserQuestion)
+whether to continue as one of them or start new. To take one: `$B assume "<name or id>"`. You
+get its name, work item, lanes, leases and every message sent to it, by name or old id. Leads
+keep messaging the same name. To start new: `$B name "<2-5 words>"`.
 
 ## 4d. The record is in git
 
