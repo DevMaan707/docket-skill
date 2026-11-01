@@ -200,6 +200,9 @@ docket board                                           # pinned notices and rece
 
 - **Mail arrives on its own.** Unread messages are injected with your next prompt and after any
   tool call while you're mid-turn, inside `<docket-mail>`, then marked read. Answer with `reply`.
+- **Status belongs in your brief,** not in mail. Fyi mail to a busy lead (over 20 in 2 hours) is
+  batched into a digest every 30 min (`DOCKET_DIGEST_MINUTES`) and doesn't wake it; asks, findings
+  and replies to its threads still arrive at once. `docket show <msg id>` reads one in full.
 - **Post to the board** facts every session should know that don't belong to one work item:
   shared machines and their load, a changed baseline, a wiped directory, a rule the user set.
   `--pin` shows it to every new session at start (`unpin <id>` when it no longer holds).

@@ -925,6 +925,8 @@ def apply(st, ev):
         for m in st.get("msgs", []):
             if m["id"] in ids and sid not in m["readBy"]:
                 m["readBy"].append(sid)
+        if ev.get("digest"):  # status fyi went out as a digest: the next one waits DIGEST_SECS
+            s["digestTs"] = ts
     elif kind == "msg_unread":  # read by a listener nobody heard: deliver again
         for m in st.get("msgs", []):
             if m["id"] in (ev.get("ids") or []) and sid in m["readBy"]:
@@ -2202,9 +2204,9 @@ def to_label(st, to):
     return ", ".join(t if t in ("board", "all") or t.startswith("W-") else sname(st, t) for t in to)
 
 
-def mail_block(st, sid):
-    got = inbox(st, sid)
-    if not got:
+def mail_block(st, sid, flush=False):
+    got, digest = mail_split(st, sid, flush)
+    if not got and not digest:
         return None, []
     direct = [m for m in got if set(m["to"]) != {"board"}]
     posts = [m for m in got if set(m["to"]) == {"board"}]
@@ -2226,6 +2228,8 @@ def mail_block(st, sid):
             out.append("  Tracked as pending task A-%s on %s. Investigate it (it's your area), then reply "
                        "with what you found; resolve A-%s when fixed, or drop it with a reason."
                        % (m["id"][:6], ", ".join(m["wids"]) or "no work item", m["id"][:6]))
+    if digest:
+        out.append(digest_text(st, digest))
     if posts:
         out.append("New on the board (%s board): " % c + "; ".join(
             "[%s] %s: %s" % (m["id"], who_label(st, m), clip(flag_suspicious(m["title"]), 100))
@@ -2233,7 +2237,7 @@ def mail_block(st, sid):
     out += ['Reply: %s reply <id> "<text>" --session %s. Write: %s msg <session name|id|W-xxxx|all> '
             '"<text>" --session %s. Post a notice: %s post "<title>" -b "<text>" --session %s [--pin].'
             % (c, sid, c, sid, c, sid), "</docket-mail>"]
-    return "\n".join(out), [m["id"] for m in got]
+    return "\n".join(out), [m["id"] for m in got + digest]
 
 
 def size(n):
@@ -2786,12 +2790,51 @@ def mail_waiting(root, sid):
     return True
 
 
-def deliver_mail(root, sid, st=None):
+def deliver_mail(root, sid, st=None, flush=False):
     st = st or load_state(root)
-    text, ids = mail_block(st, sid)
+    dig = bool(mail_split(st, sid, flush)[1])
+    text, ids = mail_block(st, sid, flush)
     if ids:
-        emit(root, sid=sid, kind="msg_read", ids=ids, title="Read %d messages" % len(ids))
+        emit(root, sid=sid, kind="msg_read", ids=ids, title="Read %d messages" % len(ids), **({"digest": True} if dig else {}))
     return text
+
+
+# ----------------------------------------------------------------- status digest for hubs
+HUB_FYI, HUB_SECS = 20, 7200  # more direct status fyi than this in HUB_SECS makes a session a hub
+DIGEST_SECS = _envnum("DOCKET_DIGEST_MINUTES", 30) * 60  # a hub gets held status fyi at most this often
+
+
+def batched(st, sid, msgs):
+    """The status fyi among msgs that a hub gets in a digest instead of one by one: plain fyi from another
+    session sent straight to it. Asks, findings, the user's and steward's mail, all/board/W-xxxx mail and
+    replies in a thread the hub wrote in stay immediate. A hub got more than HUB_FYI of them in HUB_SECS."""
+    me, all_ = selves(st, sid), st.get("msgs", [])
+    threads = {m["re"] or m["id"] for m in all_ if m["sid"] in me}
+
+    def status(m):
+        to = set(m["to"])
+        return (m.get("kind", "fyi") == "fyi" and m["sid"] not in me | {"user", "steward"} and me & to
+                and not to & {"board", "all"} and (m.get("re") or m["id"]) not in threads)
+    cut = now() - HUB_SECS
+    if sum(1 for m in all_ if m["ts"] > cut and status(m)) <= HUB_FYI:
+        return []
+    return [m for m in msgs if status(m)]
+
+
+def mail_split(st, sid, flush=False):
+    """Unread mail as (deliver now, deliver as a digest). Held status fyi wait until DIGEST_SECS after
+    the last digest; flush (docket inbox) hands them over anyway."""
+    got = inbox(st, sid)
+    held = batched(st, sid, got)
+    due = flush or now() - st["sessions"].get(sid, {}).get("digestTs", 0) >= DIGEST_SECS
+    return [m for m in got if m not in held], held if due else []
+
+
+def digest_text(st, msgs):
+    return "\n".join(["Status digest: %d fyi held since the last one (you get many, so they come every %d min):"
+                      % (len(msgs), DIGEST_SECS // 60)] +
+                     ["- [%s] %s: %s" % (m["id"], who_label(st, m), clip(flag_suspicious(m["title"]), 100)) for m in msgs] +
+                     ["Read any in full: %s show <id>." % cli()])
 
 
 def _listen_file(root, sid):
@@ -2850,7 +2893,7 @@ def listen(root, sid, hours):
                 s = st["sessions"].get(sid)
                 if s and (s["status"] == "ended" or process_gone(s)):
                     return 0
-                g, got = st.get("goal"), inbox(st, sid)
+                g, got = st.get("goal"), mail_split(st, sid)[0]
                 news = ["- [%s] %s from %s: %s" % (x["id"], MSG_KINDS.get(x.get("kind"), "FYI"), who_label(st, x),
                                                      flag_suspicious(x["title"])) for x in got[-10:]]
                 if [d_ for d_ in directives(st) if d_["id"] not in (s or {}).get("dirSeen", [])]:
@@ -3044,6 +3087,8 @@ def wake(st, ev, text=None):
         wids = {w for w, it in st["work"].items() if any(y["sid"] in selves(st, x["id"]) for y in it["sessions"])}
         if not ("all" in to or selves(st, x["id"]) & to or wids & to):
             continue
+        if text is None and batched(st, x["id"], [m for m in st.get("msgs", []) if m["id"] == ev.get("id")]):
+            continue  # status fyi to a hub: it waits for the digest
         line = text or ("[docket] %s from %s: %s\nRead it with `%s inbox --session %s` (it also arrives with your next "
                         "tool call), then answer with `%s reply %s \"...\"`."
                         % (MSG_KINDS.get(ev.get("msgKind"), "Message"), sname(st, ev["sid"]),
@@ -4093,6 +4138,11 @@ def main():
         if e:
             print(entry_text(st, e))
             return 0
+        m_ = not wid and not e and find_msg(st, a.wid)
+        if m_:
+            print("[%s] %s from %s to %s, %s: %s\n%s" % (m_["id"], MSG_KINDS.get(m_.get("kind"), "FYI"), who_label(st, m_),
+                                                     to_label(st, m_["to"]), ago(m_["ts"]), m_["title"], m_["body"]))
+            return 0
         if not wid:
             sys.exit("No such work item or entry: %s" % a.wid)
         if a.cmd == "show":
@@ -4173,6 +4223,10 @@ def main():
                 print("  nudged %d session%s through Claude Code's inbox" % (n_, "" if n_ == 1 else "s"))
         if ev.get("wids"):
             print("  tracked as pending task A-%s on %s" % (mid[:6], ", ".join(ev["wids"])))
+        for t in ev["to"]:
+            if t in st["sessions"] and batched(st, t, st["msgs"][-1:]):
+                print("  %s gets status in a %d-min digest; for status, update your brief instead (%s log brief ...)"
+                      % (sname(st, t), DIGEST_SECS // 60, cli()))
         return 0
     if a.cmd == "listen":
         return listen(root, sid, max(0.01, a.hours))
@@ -4517,7 +4571,7 @@ def main():
                 print("[%s] %s → %s, %s: %s%s" % (m["id"], who_label(st, m), to_label(st, m["to"]), ago(m["ts"]),
                                                 m["title"], "" if m["sid"] == sid or sid in m["readBy"] else "  (unread)"))
             return 0
-        text = deliver_mail(root, sid, st)
+        text = deliver_mail(root, sid, st, flush=True)
         print(text or "No unread messages.")
         return 0
     if a.cmd == "leases":
