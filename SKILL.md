@@ -237,9 +237,12 @@ docket board                                           # pinned notices and rece
   goal post a short nudge into the recipient's Claude Code inbox. An idle session starts a turn with
   it, and a busy one reads it between tool calls. The full text still arrives through the hooks. On
   older versions, run `docket listen --session <id>` with Bash `run_in_background: true` before you
-  stop (never `&` or `> /dev/null`); the Stop hook reminds you. A session in bypass-permissions
-  mode holds these nudges for the user's approval unless its `crossSessionInbound` setting is
-  `accept`.
+  stop (never `&` or `> /dev/null`); the Stop hook reminds you. Docket learns per session whether
+  the nudges work: once one has started a turn, `listen` exits at once with "Not needed", so don't
+  restart it. A session in bypass-permissions mode holds these nudges for the user's approval
+  unless its `crossSessionInbound` setting is `accept`; after two go unanswered, the Stop hook asks
+  for that setting or a listener. `docket who` shows each session's wake: socket, listener or
+  unknown.
 - **Nobody idles while the goal is open.** While an autonomous goal is open, a background waker
   checks every 5 minutes. A session idle for 20 minutes is woken, at most every 30, and told to
   carry on in its lane or take work (`ready`, `audit`). Sessions that said they're waiting (`wait`),
