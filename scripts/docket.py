@@ -692,6 +692,26 @@ def find_entry(st, eid):
     return exact[0] if exact else hits[0] if len(hits) == 1 else None
 
 
+SOCK_ANSWER_SECS = 120
+
+
+def sock_heard(s, ts, nudge):
+    """Settle the session's pending socket nudge: a [docket] prompt within 2 min means nudges wake it; a nudge
+    still unanswered after that is a miss (one drops sockOk, two in a row mark it sockBlocked)."""
+    w = s.get("sockWakeTs")
+    if not w or (nudge is False and ts - w <= SOCK_ANSWER_SECS):  # another nudge in the window: still pending
+        return
+    s.pop("sockWakeTs")
+    if nudge and ts - w <= SOCK_ANSWER_SECS:
+        s["sockOk"], s["sockMiss"] = ts, 0
+        s.pop("sockBlocked", None)
+    elif ts - w > SOCK_ANSWER_SECS:
+        s.pop("sockOk", None)
+        s["sockMiss"] = s.get("sockMiss", 0) + 1
+        if s["sockMiss"] >= 2:
+            s["sockBlocked"] = ts
+
+
 def apply(st, ev):
     ts, sid, who, kind = ev["ts"], ev["sid"], ev.get("agent") or "main", ev["kind"]
     s = session(st, sid, ts)
@@ -711,7 +731,17 @@ def apply(st, ev):
     if sid == "steward" and not s["name"]:
         s["name"] = "Docket steward"
     if ev.get("sock"):
+        if ev["sock"] != s.get("sock"):  # a new process: whether nudges get through must be learned again
+            for k in ("sockOk", "sockBlocked", "sockMiss", "sockWakeTs"):
+                s.pop(k, None)
         s["sock"] = ev["sock"]  # Claude Code's inbox socket: docket wakes the session through it
+    if kind == "sock_wake":  # did the nudge start a turn? Learned per session, so `listen` knows if it's needed
+        for x in [st["sessions"].get(t) for t in ev.get("to") or []]:
+            if x and x["status"] == "idle":
+                sock_heard(x, ts, False)
+                x.setdefault("sockWakeTs", ts)
+    elif kind == "prompt" and s.get("sockWakeTs"):  # a nudge arrives as a prompt that starts with [docket]
+        sock_heard(s, ts, body.startswith("[docket]") or None)  # None: the user spoke first, no verdict
     if kind == "session_start":
         s["status"] = "idle"
         if ev.get("name") and not s["name"]:
@@ -2098,9 +2128,14 @@ def handle_hook(inp):
             late = deliver(root, sid, st)  # arrived while this turn was finishing
             if not late:
                 late = upkeep(root, sid, st)
-            if not late and others_live(st, sid) and not os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") \
-                    and not st["sessions"].get(sid, {}).get("sock") and not listening(root, sid):
-                late = ("Other sessions are live here and may message you while you're idle. Before you stop, "
+            me = st["sessions"].get(sid, {})
+            if not late and others_live(st, sid) and (me.get("sockBlocked") or not (
+                    os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") or me.get("sock"))) and not listening(root, sid):
+                late = (("Docket's nudges through Claude Code's inbox went unanswered twice while you were idle, "
+                         "likely because bypass-permissions mode holds them for the user's approval. Set "
+                         "`crossSessionInbound: accept` in your Claude Code settings, or keep a listener running: "
+                         if me.get("sockBlocked") else
+                         "Other sessions are live here and may message you while you're idle. Before you stop, ") +
                         "run `%s listen --session %s` using Bash's run_in_background: true parameter (not & or "
                         "nohup: those can't wake you). It exits when mail arrives, which wakes you; then answer it." % (cli(), sid))
             if late:
@@ -2833,6 +2868,11 @@ def listen(root, sid, hours):
     if listening(root, sid):
         print("A listener is already running for this session.")
         return 0
+    s = load_state(root)["sessions"].get(sid) or {}
+    if s.get("sockOk") and os.environ.get("DOCKET_WAKE") != "off":  # a miss or a new process clears sockOk
+        print("Not needed: docket wakes this session through Claude Code's inbox (verified %s). "
+              "Don't restart the listener." % ago(s["sockOk"]))
+        return 0
     p = _listen_file(root, sid)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w") as f:
@@ -3037,7 +3077,7 @@ def wake(st, ev, text=None):
     if os.environ.get("DOCKET_WAKE") == "off":
         return 0
     me, to = selves(st, ev["sid"]), set(ev.get("to") or ["all"])
-    host, n = socket.gethostname(), 0
+    host, n, hit = socket.gethostname(), 0, []
     for x in st["sessions"].values():
         if x["id"] in me or x["status"] == "ended" or not x.get("sock") or x.get("host") != host or process_gone(x):
             continue
@@ -3055,8 +3095,15 @@ def wake(st, ev, text=None):
             c.sendall((json.dumps({"type": "user", "message": {"role": "user", "content": line}}) + "\n").encode())
             c.close()
             n += 1
+            hit.append(x["id"])
         except (OSError, AttributeError):
             pass
+    try:  # remembered so apply() can learn whether the nudge started a turn
+        if hit:
+            emit(st["root"], sid=ev["sid"] if ev["sid"] in st["sessions"] else "steward", kind="sock_wake", to=hit,
+                 title="Nudged %d through the inbox" % len(hit))
+    except Exception:
+        pass
     return n
 
 
@@ -4035,8 +4082,9 @@ def main():
     if a.cmd == "who":
         live = sorted([x for x in st["sessions"].values() if is_live(x)], key=lambda x: -x["last"])
         for x in live:
-            print("%-10s %-32s %-8s %s  %s%s" % (x["id"][:8], clip(x["name"] or "-", 32), x.get("work") or "-",
-                                                x["status"], ago(x["last"]), "  %s tokens" % ktok(x["tokens"]) if x.get("tokens") else ""))
+            wk = "socket" if x.get("sockOk") else "listener" if x.get("sockBlocked") or not x.get("sock") else "unknown"
+            print("%-10s %-32s %-8s %s  %s  wake:%s%s" % (x["id"][:8], clip(x["name"] or "-", 32), x.get("work") or "-",
+                                                x["status"], ago(x["last"]), wk, "  %s tokens" % ktok(x["tokens"]) if x.get("tokens") else ""))
         print("" if live else "No live sessions.", end="")
         print("\nAddress by name, id prefix, W-xxxx (everyone on it), all, or board." if live else "")
         return 0
