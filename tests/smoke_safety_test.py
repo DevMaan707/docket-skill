@@ -113,7 +113,7 @@ def _main(d):
     check("pending defaults to the session's item", code == 0 and "required" not in out, out[-200:])
     for c, want in (('cd /x; python3 /a/docket.py reply 12 "hi"', True), ("D=/a/docket.py; S=x; python3 $D who", True),
                     ('B="python3 /a/docket.py"; $B who', True), ('d(){ python3 /a/docket.py "$@"; }; d reply 1 "x"', True),
-                    ("cd x && go test ./...", False), ("python3 scan.py", False), ("X=1; python3 $X", False)):
+                    ("docket mem", True), ("cd x; docket reply 1 hi", True), ("cd x && go test ./...", False), ("python3 scan.py", False), ("X=1; python3 $X", False)):
         check("memory guard: %s is %s" % (c, "light" if want else "new work"), docket.light(c) == want)
     other = os.path.join(d, "other")
     os.makedirs(os.path.join(other, ".docket"))
