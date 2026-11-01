@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .docket/
 .DS_Store
+.claude/worktrees/
