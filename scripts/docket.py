@@ -943,6 +943,8 @@ def apply(st, ev):
         for m in st.get("msgs", []):
             if m["id"] == ev.get("ref"):
                 m["withdrawn"] = ev.get("body") or True
+    elif kind in ("queue_add", "queue_take", "queue_done"):
+        apply_queue(st, ev, sid, who, ts)
 
     if kind in ENTRY_KINDS and kind not in ("task", "unblock"):
         e = {"id": ev["id"], "ts": ts, "kind": "summary" if kind == "done" else kind,
@@ -1878,7 +1880,7 @@ def handle_hook(inp):
         start_rouser(root, st)
         head = "\n".join(x for x in (context_for(root, sid, "main"), resumed, ident,
                                      brief_reminder(st, sid) if inp.get("source") == "compact" else None, cv) if x)
-        rest = "\n".join(x for x in (team_block(st, sid), dv, g, pinned_block(st), digest) if x)
+        rest = "\n".join(x for x in (team_block(st, sid), queues_line(st), dv, g, pinned_block(st), digest) if x)
         if len(head) + len(rest) > CTX_CAP:  # a long board must not crowd out the session's own context
             rest = rest[:max(0, CTX_CAP - len(head))].rsplit("\n", 1)[0] + "\n(more: %s who / board / digest)" % cli()
         hook_output(event, "\n".join(x for x in (head, rest) if x))
@@ -3075,6 +3077,122 @@ def locks_text(st):
                                      " (%s)" % clip(l["why"], 80) if l["why"] else "") for k, l in rows]
 
 
+# ------------------------------------------------------------ work queues
+QUEUE_STALE = 86400  # an item running longer than this is shown as stale
+QUEUE_KEEP = 50  # finished items kept per queue
+
+
+def apply_queue(st, ev, sid, who, ts):
+    """queue_add / queue_take / queue_done. A take names no item: the oldest waiting one goes to whoever's
+    take comes first in the log, so two sessions taking at once never get the same item, and rebuild agrees."""
+    q = st.setdefault("queues", {}).setdefault(ev.get("queue") or "default", {"items": []})
+    its, kind = q["items"], ev["kind"]
+    if kind == "queue_add":
+        its.append({"id": "Q-" + ev["id"][:6], "title": ev.get("title", ""), "body": ev.get("body", ""), "sid": sid,
+                    "agent": who, "ts": ts, "status": "waiting", "re": ev.get("re")})
+    elif kind == "queue_take":
+        it = next((i for i in its if i["status"] == "waiting"), None)
+        if it:
+            it.update(status="running", by=sid, taken=ts, take=ev["id"])
+    elif kind == "queue_done":
+        it = next((i for i in its if i["id"] == ev.get("ref") and i["status"] in ("waiting", "running")), None)
+        if it:
+            it.update(status=ev.get("status") or "done", result=ev.get("body", ""), doneBy=sid, finished=ts)
+        old = {i["id"] for i in [i for i in its if i["status"] not in ("waiting", "running")][:-QUEUE_KEEP]}
+        q["items"] = [i for i in its if i["id"] not in old]
+
+
+def queue_item(st, name, ref):
+    ref = (ref or "").upper()
+    ref = ref if ref.startswith("Q-") else "Q-" + ref
+    hits = [i for i in st.get("queues", {}).get(name, {}).get("items", []) if i["id"].upper().startswith(ref)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def queue_counts(st, name):
+    its = st.get("queues", {}).get(name, {}).get("items", [])
+    return sum(i["status"] == "waiting" for i in its), sum(i["status"] == "running" for i in its)
+
+
+def queues_line(st):
+    """One line for SessionStart: the queues with something waiting or running."""
+    qs = ["%s (%d waiting, %d running)" % ((n,) + queue_counts(st, n)) for n in sorted(st.get("queues", {}))
+          if any(queue_counts(st, n))]
+    return "Queues: %s. See: %s queue <name>" % ("; ".join(qs), cli()) if qs else None
+
+
+def queue_list(st, name):
+    its = st.get("queues", {}).get(name, {}).get("items", [])
+    out, pos = ["Queue %s" % name], 0
+    for i in its:
+        if i["status"] == "waiting":
+            pos += 1
+            out.append("  %d. %s waiting  %s  (added by %s, %s)" % (pos, i["id"], clip(i["title"], 80), sname(st, i["sid"]), ago(i["ts"])))
+    for i in its:
+        if i["status"] == "running":
+            out.append("  %s running%s  %s  (by %s since %s; added by %s)" % (
+                i["id"], " STALE" if now() - i["taken"] > QUEUE_STALE else "", clip(i["title"], 80),
+                sname(st, i["by"]), ago(i["taken"]), sname(st, i["sid"])))
+    for i in [i for i in its if i["status"] not in ("waiting", "running")][-5:]:
+        out.append("  %s %s  %s: %s  (%s, by %s)" % (i["id"], i["status"], clip(i["title"], 60), clip(i["result"], 100),
+                                                   ago(i["finished"]), sname(st, i["doneBy"])))
+    return "\n".join(out if len(out) > 1 else out + ["  (empty)"])
+
+
+def queue_cmd(root, st, a, sid):
+    if not a.name or (a.name == "list" and a.action == "list" and not a.arg):
+        rows = ["- %s: %d waiting, %d running" % ((n,) + queue_counts(st, n)) for n in sorted(st.get("queues", {}))]
+        print("\n".join(rows) or 'No queues. Start one: %s queue <name> add "<title>"' % cli())
+        return 0
+    name = a.name.strip().lower()
+    if a.action == "list":
+        print(queue_list(st, name))
+        return 0
+    if a.action == "add":
+        a.arg or sys.exit('Give a title: queue %s add "<title>"' % name)
+        if a.re and not find_msg(st, a.re):
+            sys.exit("No message with id %s." % a.re)
+        ev, st = emit(root, sid=sid, agent=a.agent, kind="queue_add", queue=name, title=clip(a.arg, 200),
+                      body=clip(a.body, 4000), re=find_msg(st, a.re)["id"] if a.re else None)
+        print("queued Q-%s on %s at position %d" % (ev["id"][:6], name, queue_counts(st, name)[0]))
+        return 0
+    if a.action == "next":
+        if not queue_counts(st, name)[0]:
+            print("Nothing waiting on %s." % name)
+            return 0
+        ev, st = emit(root, sid=sid, agent=a.agent, kind="queue_take", queue=name, title="Took the next item on " + name)
+        it = next((i for i in st["queues"][name]["items"] if i.get("take") == ev["id"]), None)
+        if not it:
+            print("Nothing waiting on %s (another session took the last item)." % name)
+            return 0
+        print("took %s: %s\n  added by %s, %s%s\nFinish it with: %s queue %s done %s --result \"...\" [--failed]" % (
+            it["id"], it["title"], sname(st, it["sid"]), ago(it["ts"]), "\n  " + it["body"] if it["body"] else "",
+            cli(), name, it["id"]))
+        return 0
+    it = queue_item(st, name, a.arg) or sys.exit("No item %s on queue %s (see: queue %s)." % (a.arg, name, name))
+    if it["status"] not in ("waiting", "running"):
+        sys.exit("%s is already %s." % (it["id"], it["status"]))
+    text = a.reason if a.action == "drop" else a.result
+    text or sys.exit("%s needs %s." % (a.action, "--reason" if a.action == "drop" else '--result "<text>"'))
+    status = "dropped" if a.action == "drop" else "failed" if a.failed else "done"
+    _, st = emit(root, sid=sid, agent=a.agent, kind="queue_done", queue=name, ref=it["id"], status=status,
+                 title="%s %s on %s" % (it["id"], status, name), body=clip(text, 4000))
+    print("%s %s" % (it["id"], status))
+    m = find_msg(st, it["re"]) if it.get("re") else None
+    if m and m.get("kind") == "ask" and m.get("wids"):  # the ask that asked for this run is settled by it
+        _, st = emit(root, sid=sid, agent=a.agent, kind="pending_set", wid=m["wids"][0], pid="A-" + m["id"][:6],
+                     title="dropped" if status == "dropped" else "done", body=clip("queue %s %s: %s" % (it["id"], status, text), 500),
+                     subject=m["title"])
+        print("  closed pending task A-%s" % m["id"][:6])
+    if it["sid"] not in selves(st, sid) and it["sid"] in st["sessions"]:  # the requester hears through the usual mail
+        ev, st = emit(root, sid=sid, agent=a.agent, kind="msg", to=[it["sid"]], msgKind="fyi", re=it.get("re"),
+                      title=clip("%s %s on %s: %s" % (it["id"], status, name, text), 200),
+                      body=clip("%s\n\n%s" % (it["title"], text), 6000))
+        print("  told %s (message %s)" % (sname(st, it["sid"]), ev["id"]))
+        wake(st, ev)
+    return 0
+
+
 def metric_vals(text):
     vals = {}
     for kv in text:
@@ -3907,6 +4025,17 @@ def main():
     ul_.add_argument("name")
     ul_.add_argument("--session", **sess)
     sub.add_parser("locks", help="who holds which named resources")
+    qu_ = sub.add_parser("queue", help="a shared work queue (a test box, the gate): add, next, done, drop, list")
+    qu_.add_argument("name", nargs="?", help="the queue; none lists every queue")
+    qu_.add_argument("action", nargs="?", default="list", choices=["list", "add", "next", "done", "drop"])
+    qu_.add_argument("arg", nargs="?", help="add: the title; done/drop: the item id (Q-xxxxxx)")
+    qu_.add_argument("-b", "--body", default="")
+    qu_.add_argument("--re", help="add: the message (an ask) this item answers; done closes its pending task")
+    qu_.add_argument("--result", default="")
+    qu_.add_argument("--failed", action="store_true")
+    qu_.add_argument("--reason", default="")
+    qu_.add_argument("--session", **sess)
+    qu_.add_argument("--agent", default=os.environ.get("DOCKET_AGENT", "main"))
     mt_ = sub.add_parser("metric", help="record a measurement: metric sast fp=6 fn=2 --sha abc --status green")
     mt_.add_argument("name")
     mt_.add_argument("vals", nargs="+", help="key=value pairs")
@@ -4359,6 +4488,8 @@ def main():
     if a.cmd == "locks":
         print("\n".join(locks_text(st)) or "No named resources are held.")
         return 0
+    if a.cmd == "queue":
+        return queue_cmd(root, st, a, sid)
     if a.cmd == "metric":
         vals = metric_vals(a.vals)
         prev = latest_metric(st, a.name)
