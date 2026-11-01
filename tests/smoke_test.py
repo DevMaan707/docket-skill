@@ -697,6 +697,17 @@ def main():
         dk2._GITLOG["/repo"] = (time.time(), [("abc1234", "Rotate signing keys for the auth service", time.time())])
         check("a commit that matches a task flags it as probably done",
               (dk2.maybe_done({"root": "/repo"}, {"subject": "Rotate signing keys", "ts": 0}) or "").startswith("abc1234"))
+        # sessions that run without prompts still get told to update their brief, at most every 30 min
+        st_ = dk2.load_state(d)
+        sw = next(k for k, v in st_["sessions"].items() if v.get("work") and st_["work"][v["work"]]["status"] == "open")
+        st_["sessions"][sw]["progressTs"] = time.time()
+        st_["sessions"][sw]["brief"] = {"ts": time.time() - 3600}
+        shutil.rmtree(os.path.join(d, ".docket", "tidy"), ignore_errors=True)  # earlier hooks already checked
+        n1, n2 = dk2.tidy_nudge(d, sw, st_), dk2.tidy_nudge(d, sw, st_)
+        check("a stale brief is nudged mid-turn, then not again for a while", n1 and "brief" in n1 and n2 is None, str(n1))
+        st_["work"][st_["sessions"][sw]["work"]].update(status="parked", updated=time.time() - 3600)
+        n3 = dk2.stale_brief(st_, sw)
+        check("a session still working under a parked item is told to re-file", n3 and "parked" in n3 and "work attach" in n3, str(n3))
         # a day-old task goes up for review; once two sessions pass on it, it's removed
         st_ = json.load(open(os.path.join(d, ".docket", "state.json")))
         for s_ in st_["sessions"].values():

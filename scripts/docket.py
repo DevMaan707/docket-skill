@@ -1784,8 +1784,10 @@ def handle_hook(inp):
             plan = ti.get("plan") or ""
             first = next((l.strip("# ").strip() for l in plan.splitlines() if l.strip()), "Plan")
             emit(root, kind="plan", title=clip(first, 120), body=clip(plan, 8000), **E)
-        if who == "main" and mail_waiting(root, sid):  # mail and new goals reach a session mid-turn
-            hook_output(event, deliver(root, sid))
+        if who == "main":  # mail, new goals and a stale-brief nudge reach a session mid-turn
+            out = [deliver(root, sid) if mail_waiting(root, sid) else None, tidy_nudge(root, sid)]
+            if any(out):
+                hook_output(event, "\n".join(x for x in out if x))
 
     elif event == "SubagentStart":
         got = _pending(root, "pop", sid, typ or "") or {}
@@ -1824,6 +1826,9 @@ def handle_hook(inp):
                         "if only to say you can't or when you will, then stop." % ("\n".join(
                             "- [%s] from %s, %s: %s" % (m["id"], who_label(st, m), ago(m["ts"]), clip(m["title"], 120))
                             for m in due[:8]), cli()))
+            if not late:
+                tidy = tidy_nudge(root, sid, st)
+                late = tidy and tidy.replace("<docket>", "Before you go idle: ").replace("</docket>", "")
             if not late and others_live(st, sid) and not os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") \
                     and not st["sessions"].get(sid, {}).get("sock") and not listening(root, sid):
                 late = ("Other sessions are live here and may message you while you're idle. Before you stop, "
@@ -2432,8 +2437,14 @@ def recover_msgs(root, st, hours):
 
 
 def stale_brief(st, sid):
-    """Other sessions plan from your brief: nudge when it lags your work by more than 30 minutes."""
+    """Other sessions plan from your brief: nudge when it lags your work by more than 30 minutes,
+    or when the item you're filed under is closed or parked while you keep working."""
     s = st["sessions"].get(sid, {})
+    w = st["work"].get(s.get("work") or "")
+    if w and w["status"] != "open" and s.get("progressTs", 0) - w["updated"] > 600:
+        return ("<docket>You are filed under %s (%s), which is %s, but you keep working: your updates land in the "
+                "wrong place. Attach to the item you're actually on (%s work attach W-xxxx --session %s, or work new), "
+                "then rewrite your brief there.</docket>" % (w["id"], clip(w["title"], 80), w["status"], cli(), sid))
     b = s.get("brief") if isinstance(s.get("brief"), dict) else {}
     if not s.get("work") or s.get("progressTs", 0) - b.get("ts", s.get("started", 0)) < 1800:
         return None
@@ -2441,6 +2452,26 @@ def stale_brief(st, sid):
             "\"<title>\" --now --done --next --blocked --session %s), and read theirs (%s who, %s inbox) before you go on."
             "</docket>" % (s["work"], "missing and you're well into the work" if not b else
                            "%d min" % ((s["progressTs"] - b["ts"]) // 60), cli(), sid, cli(), cli()))
+
+
+TIDY_SECS = 1800
+
+
+def tidy_nudge(root, sid, st=None):
+    """The brief/filing nudge for sessions that run without prompts: at most once per TIDY_SECS,
+    checked with one stat so PostToolUse stays cheap."""
+    f = os.path.join(bdir(root), "tidy", re.sub(r"[^\w-]", "_", sid))
+    try:
+        if now() - os.path.getmtime(f) < TIDY_SECS:
+            return None
+    except OSError:
+        pass
+    text = stale_brief(st or load_state(root), sid)
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    open(f, "w").close()
+    if not text:  # nothing due: look again in five minutes, not on every tool call
+        os.utime(f, (now() - TIDY_SECS + 300,) * 2)
+    return text
 
 
 def wake(st, ev, text=None):

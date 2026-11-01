@@ -33,8 +33,9 @@ not a soloist:
   each new piece of work, and whenever mail arrives. Use `inbox`, the board, `show W-xxxx` and
   `audit`. Your memory of the project is older than the docket.
 - **Write your context back.** Rewrite your brief after every meaningful step (now, done, next,
-  blocked). Other sessions plan from it. A prompt reminder fires when your brief lags your work by
-  more than 30 minutes.
+  blocked). Other sessions plan from it. When your brief lags your work by more than 30 minutes you are
+  reminded mid-turn and stopped once before going idle, prompt or not: do it then, without being
+  asked. If the item you're filed under is parked or closed, attach to the one you're really on.
 - **Never reimplement.** Before building, search the docket and `git log` for the same thing.
   `work new` stops on a matching open item, and spawning an agent warns when another session's
   agent is already doing that job. Ask for that result instead of producing it twice.
