@@ -220,6 +220,8 @@ docket board                                           # pinned notices and rece
   `unpin <id>...` superseded pins, `withdraw <id> --reason "<decision/commit>"` notes the user no
   longer needs to answer (never one still waiting on them), close or park dead items, message
   sessions with stale briefs. Then reply to the ask with what you did.
+  A rule that holds for good (a user directive, a standing constraint) is `post ... --pin --keep` (or
+  `pin <id> --keep`): shown as RULE and never listed as stale; don't unpin it to clear tidy.
 - **Message, don't just log,** when another live session's work depends on what you found: a
   revert of its change, a conflicting number, a resource you both use.
 - **You hit a problem in another session's area** (its build got slower, its change broke
@@ -275,7 +277,8 @@ docket board                                           # pinned notices and rece
 - **Lock what isn't a file.** A test box, a port, the gate or a DB: `docket lock box-2 --minutes 40
   --why "SAST gate"`. Another session is refused, and told who holds it and why. `unlock` releases
   it, `locks` lists the holders, and new sessions see them. Never start a run on a shared box
-  without holding its lock.
+  without holding its lock. Need it next? `lock <name> --wait` puts you in line instead of messaging the
+  holder: when it's released or expires it's locked for you and you're woken.
 - **Record numbers, not prose.** `docket metric sast fp=6 fn=2 precision=0.86 --sha <commit> --box 2
   --status red|green`. `docket metrics` shows the latest value of every gate with the change since the
   last run, and red gates are shown to every new session. A goal can be set `--until
