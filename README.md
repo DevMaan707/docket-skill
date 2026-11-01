@@ -179,7 +179,8 @@ met or they log a real blocker (capped at 10 turns in a row). `audit` lists task
 stale ones, ones marked done without evidence, and items whose tasks are all finished; `reopen`
 puts back a task that was marked done but isn't. `work park <ids> --reason` (or `--idle <hours>`)
 sinks stale items and their sub-items to the bottom of the index and out of the audit, still readable;
-attaching to one brings it back.
+attaching to one brings it back. A task nobody took for 24 hours shows as `REVIEW`: a session either
+adopts it or votes `pass <id> --reason`; after two passes (or every live session's) it's removed.
 
 ## Surviving /clear
 

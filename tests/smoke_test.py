@@ -697,6 +697,20 @@ def main():
         dk2._GITLOG["/repo"] = (time.time(), [("abc1234", "Rotate signing keys for the auth service", time.time())])
         check("a commit that matches a task flags it as probably done",
               (dk2.maybe_done({"root": "/repo"}, {"subject": "Rotate signing keys", "ts": 0}) or "").startswith("abc1234"))
+        # a day-old task goes up for review; once two sessions pass on it, it's removed
+        st_ = json.load(open(os.path.join(d, ".docket", "state.json")))
+        for s_ in st_["sessions"].values():
+            for e in s_["entries"]:
+                if "streaming writer" in (e.get("next") or ""):
+                    e["ts"] -= 25 * 3600
+        rows = [r for r in dk2.audit(st_) if "streaming writer" in r[3]]
+        check("a task a day old is flagged for review: take it up or pass", rows and rows[0][2] == "REVIEW", str(rows))
+        wpid = rows[0][1] if rows else "?"
+        _, o1 = run(["pass", wpid, "--reason", "exporter was cut from scope"], d, "sM1")
+        first = dk2.task_owner(dk2.load_state(d), rows[0][0], wpid) if rows else None
+        _, o2 = run(["pass", wpid, "--reason", "agree, nobody needs CSV"], d, "sM2")
+        check("one pass sends it to another session; a second pass removes it",
+              "goes to another session" in o1 and first != "sM1" and "removed" in o2, o1 + o2)
 
         # /clear: same Claude process, new session id -> it carries on as the old session
         hook(d, "SessionStart", "sClr1", pid=4242001)

@@ -50,6 +50,10 @@ not a soloist:
   When the Stop hook hands you your share, settle each before you go idle: resolve it with evidence,
   adopt it, drop it with a reason, or message whoever owns it. Tasks a commit already seems to cover
   are marked `DONE?`. Check them, and resolve them with that commit as evidence.
+- **A day-old task is up for review (`REVIEW`).** Nobody took it in 24 hours, so judge it on its merits:
+  if it still improves things, `adopt` it and do it; if not, `pass <id> --reason "<why>"`. A pass hands
+  it to a different session to judge; once two sessions pass (or every live one has), it's removed with
+  their reasons. Good tasks get picked up, and dead ones don't linger.
 - **Park what's stale instead of hiding it.** `work park W-xxxx --reason "..."` (or
   `work park --idle 36 --reason "..." --dry-run` to pick every item quiet for 36 h) sets the item and
   its open sub-items to `parked`: they sink to the bottom of the index and leave the audit and sweep,

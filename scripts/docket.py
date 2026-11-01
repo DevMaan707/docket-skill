@@ -419,6 +419,10 @@ def is_live(s):
     return bool(s) and s["status"] != "ended" and now() - s["last"] < LIVE_SECS and not process_gone(s)
 
 
+PASSES_TO_DROP = 2  # sessions that must judge a day-old task not worth doing before it's removed
+REVIEW_HOURS = 24
+
+
 def pending_items(st, wid):
     """Unfinished work left on a work item, with a status for each:
     open (nobody has it), active (on a live session's task list), adopted, done, dropped."""
@@ -490,6 +494,13 @@ def pending_items(st, wid):
                       % (st["sessions"].get(ov["by"], {}).get("name") or ov["by"][:8]))
         else:
             it.update(status="open", by=None, reason="")
+        passes = [x for p in [it["pid"]] + [c["pid"] for c in it["copies"]] for x in w.get("passes", {}).get(p, [])]
+        it["passedBy"] = sorted({x["sid"] for x in passes})
+        if it["status"] == "open" and passes:
+            live = {x["id"] for x in st["sessions"].values() if is_live(x) and x["id"] not in ("user", "manual")}
+            if len(it["passedBy"]) >= PASSES_TO_DROP or (live and live <= set(it["passedBy"])):
+                it.update(status="dropped", by=None, reason="no session took it up: " + "; ".join(
+                    "%s: %s" % (sname(st, x["sid"]), x["reason"]) for x in passes))
         out.append(it)
     return out
 
@@ -539,8 +550,10 @@ def audit(st):
             hrs = (now() - i["ts"]) / 3600
             if i["status"] == "open":
                 md = maybe_done(st, i)
-                out.append((w["id"], i["pid"], "DONE?" if md else "NOT DONE", "%s; %s%s" % (
+                old = hrs >= REVIEW_HOURS and not md
+                out.append((w["id"], i["pid"], "DONE?" if md else "REVIEW" if old else "NOT DONE", "%s; %s%s" % (
                     i["subject"], "a commit looks like it: %s (resolve with that as evidence if so)" % md if md
+                    else "a day old and nobody owns it: adopt it if it still improves things, else pass it" if old
                     else "nobody owns it", ", for %d h" % hrs if hrs >= 1 else "")))
             elif i["status"] in ("active", "adopted") and hrs >= STALE_HOURS:
                 out.append((w["id"], i["pid"], "STALE", "%s; %s by %s for %d h: still going, done, or abandoned?" % (
@@ -786,6 +799,13 @@ def apply(st, ev):
         if w and (p is None or (p in st["work"] and p != w["id"]
                                 and p not in descendants(st, w["id"]))):
             w["parent"], w["updated"] = p, ts
+    elif kind == "pending_set" and title == "passed":  # one vote that a task isn't worth doing
+        w = work_item(st, ev["wid"])
+        if w:
+            ps = w.setdefault("passes", {}).setdefault(ev["pid"], [])
+            if sid not in [x["sid"] for x in ps]:
+                ps.append({"sid": sid, "reason": body, "ts": ts})
+            w["updated"] = ts
     elif kind == "pending_set":
         w = work_item(st, ev["wid"])
         if w:
@@ -1796,8 +1816,9 @@ def handle_hook(inp):
                 late = ("Before you go idle, settle these stale or unowned tasks; they're assigned to you so nothing is "
                         "forgotten (one hour until the next check):\n%s\nFor each, check the code and git log, then: done -> "
                         "%s resolve <id> --reason \"<evidence>\"; yours to do -> adopt <id>; no longer needed -> drop <id> "
-                        "--reason; another session's -> msg it; an item with nothing left -> work status W-xxxx done."
-                        % ("\n".join("- %s %s %s: %s" % r for r in mine[:6]), cli()))
+                        "--reason; a day old (REVIEW) and not worth doing -> pass <id> --reason \"<why>\" (removed once %d sessions pass); "
+                        "another session's -> msg it; an item with nothing left -> work status W-xxxx done."
+                        % ("\n".join("- %s %s %s: %s" % r for r in mine[:6]), cli(), PASSES_TO_DROP))
             if not late and due:
                 late = ("Asks to you are past their deadline with no reply:\n%s\nAnswer each (%s reply <id> \"...\"), even "
                         "if only to say you can't or when you will, then stop." % ("\n".join(
@@ -1971,7 +1992,9 @@ def goal_block(st, full=True):
 def task_owner(st, wid, pid):
     """Who must settle an audit finding: the session an ask went to, else a live session on the
     item, else a live session picked by a stable hash so the load spreads and nothing is skipped."""
-    live = sorted(x["id"] for x in st["sessions"].values() if is_live(x) and x["id"] not in ("user", "manual"))
+    passed = {x["sid"] for x in st["work"].get(wid, {}).get("passes", {}).get(pid, [])}  # ask someone new
+    live = sorted(x["id"] for x in st["sessions"].values()
+                  if is_live(x) and x["id"] not in ("user", "manual") and x["id"] not in passed)
     if not live:
         return None
     if pid.startswith("A-"):
@@ -1979,7 +2002,7 @@ def task_owner(st, wid, pid):
         to = [x for x in (m or {}).get("to", []) if x in live]
         if to:
             return to[0]
-    on = sorted(x["id"] for x in live_sessions(st, wid))
+    on = sorted(x["id"] for x in live_sessions(st, wid) if x["id"] in live)
     pool = on or live
     return pool[int(hashlib.md5((pid if pid != "-" else wid).encode()).hexdigest(), 16) % len(pool)]
 
@@ -2983,7 +3006,8 @@ def main():
     for name, hlp in (("adopt", "take pending tasks into this session"),
                       ("resolve", "mark pending tasks as already done (--reason: the evidence)"),
                       ("reopen", "a task marked done that isn't (needs --reason: what's missing)"),
-                      ("drop", "mark pending tasks as not needed (needs --reason)")):
+                      ("drop", "mark pending tasks as not needed (needs --reason)"),
+                      ("pass", "vote a day-old task not worth doing (needs --reason); removed once enough sessions pass")):
         p = sub.add_parser(name, help=hlp)
         p.add_argument("pids", nargs="+")
         p.add_argument("--reason", default="")
@@ -3604,13 +3628,13 @@ def main():
              kind="claim", paths=paths, ttl=a.ttl * 60, **({"wid": wid} if wid else {}))
         print("claimed %s for %d min (release with: release)" % (", ".join(paths), a.ttl))
         return 0
-    if a.cmd in ("adopt", "resolve", "drop", "reopen"):
-        if a.cmd in ("drop", "reopen") and not a.reason:
+    if a.cmd in ("adopt", "resolve", "drop", "reopen", "pass"):
+        if a.cmd in ("drop", "reopen", "pass") and not a.reason:
             sys.exit("%s needs --reason, so the next session knows why." % a.cmd)
         if a.cmd == "resolve" and not a.reason and "CLAUDECODE" in os.environ:
             sys.exit("resolve needs --reason with the evidence it's done (a commit, a test or gate result, a file:line), "
                      "so nobody has to redo the check.")
-        status = {"adopt": "adopted", "resolve": "done", "drop": "dropped", "reopen": "reopened"}[a.cmd]
+        status = {"adopt": "adopted", "resolve": "done", "drop": "dropped", "reopen": "reopened", "pass": "passed"}[a.cmd]
         if a.cmd == "adopt":  # critique before following: no adopting unreviewed work
             for wid in {find_pending(st, p)[0] for p in a.pids} - {None}:
                 if needs_review(st, wid, sid):
@@ -3633,6 +3657,11 @@ def main():
             _, st = emit(root, _guard=expect_guard(wid, a.expect, sid), sid=sid, kind="pending_set", wid=wid, pid=it["pid"], title=status,
                          body=clip(a.reason, 500), subject=it["subject"])
             print("  %s %s: %s" % (it["pid"], status, it["subject"]))
+            if a.cmd == "pass":
+                _, now_it = find_pending(st, it["pid"])
+                print("    %s" % ("no session wants it, so it's removed" if now_it and now_it["status"] == "dropped"
+                                  else "goes to another session to judge (%d of %d passes)" % (
+                                      len((now_it or it)["passedBy"]), PASSES_TO_DROP)))
             adopted.append(it["subject"])
         if a.cmd == "adopt" and adopted:
             print("\nAdd these to your own task list now (TodoWrite / TaskCreate) so they are tracked:")
