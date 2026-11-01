@@ -83,7 +83,11 @@ Never assume the docket is empty or that you are the first session, even on "ini
 ## 2. Before a task: reuse, don't fork
 
 The prompt hook searches the index and injects `<docket-prior-work>` pointers or a note that
-nothing matched. Search yourself with `$B search "<words>"`.
+nothing matched. Search yourself with `$B search "<words>"`: work items first, then single entries
+(decisions, facts, dead ends, reviews…) by id. `$B show <entry-id>` prints one in full;
+`--around 3` adds the entries before and after it on its work item. When you Read a file the
+record knows, a `<docket-recall>` block (once per file) points at entries citing it and other
+sessions' work that edited it: claims to check, like everything else.
 
 **A plausible match exists:**
 1. `$B show W-xxxx` and `$B check W-xxxx` (re-hashes the files facts rest on; lists STALE).
@@ -251,6 +255,9 @@ $B board                                           # pinned notices and recent p
 - **Commit only your own files.** A `git commit` that takes a file another live session holds is
   refused.
 - **Done needs evidence.** `resolve <task> --reason "<commit, test or gate result, file:line>"`.
+- **Retro.** `$B retro --days 7` reports per session what got closed, reviewed, corrected, blocked
+  and spent (tokens), with 3 recommendations, saved on the "Retros" item. When it lists the last
+  retro's recommendations, say which were addressed, partial or still open.
 - **Log dead ends.** `$B log deadend "LRU cache for the scanner" -b "no gain: hit rate 3%"`. The
   work page lists them, so nobody retries them without a new reason.
 - **The user can message you too.** A `msg` typed in a terminal, or copied from the journal's Board
