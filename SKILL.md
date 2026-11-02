@@ -211,6 +211,11 @@ docket board                                           # pinned notices and rece
   tool call while you're mid-turn, inside `<docket-mail>`, then marked read. Answer with `reply`.
 - **Don't reply just to acknowledge;** the sender sees that you read it ("Seen by 6/9" in its mail,
   `inbox`, `show <msg id>`). Reply only with an answer, a disagreement, or a result.
+- **Status goes in the record (result/handoff/brief), not in messages; messages are for questions,
+  disagreements and findings.** `docket result <W-id|task> "<outcome>" [--accepted|--killed]` and
+  `docket handoff <W-id|task> <session>` change the record (accept, kill or hand off: the item's owner
+  or the lead only) and reach the affected sessions as one `<docket-changes>` line with their next
+  hook, waking nobody. A status-looking `msg` gets a tip naming them.
 - **Status belongs in your brief,** not in mail. Fyi mail to a busy lead (over 20 in 2 hours) is
   batched into a digest every 30 min (`DOCKET_DIGEST_MINUTES`) and doesn't wake it; asks, findings
   and replies to its threads still arrive at once. `docket show <msg id>` reads one in full.
