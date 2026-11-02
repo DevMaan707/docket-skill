@@ -343,10 +343,43 @@ def ensure_board(root):
     return d
 
 
+def git_at(d):
+    """(checkout top, common git dir) of the checkout holding d, read from .git alone: rel() runs on every edit."""
+    while True:
+        g = os.path.join(d, ".git")
+        if os.path.isdir(g):
+            return d, g
+        if os.path.isfile(g):  # a linked worktree: gitdir: <common>/worktrees/<name>, which holds commondir
+            try:
+                with open(g) as f:
+                    gd = os.path.join(d, f.read().split("gitdir:", 1)[1].strip())
+                with open(os.path.join(gd, "commondir")) as f:
+                    return d, os.path.realpath(os.path.join(gd, f.read().strip()))
+            except (OSError, IndexError):
+                return d, None  # a submodule, or a broken worktree
+        if os.path.dirname(d) == d:
+            return None, None
+        d = os.path.dirname(d)
+
+
+def worktree_of(root, path):
+    """The other checkout (linked worktree, inside the project or not) of the project's repo that path is in, or None."""
+    if not path:
+        return None
+    rt, rc = git_at(os.path.realpath(root))
+    top, c = git_at(os.path.realpath(os.path.join(root, path)))
+    return top if rc and c == rc and top != rt else None
+
+
 def rel(root, path):
+    """Project-relative key. A file in another worktree of the project's repo gets the key of the same file in the
+    project's checkout, so leases collide across worktrees as they would in one checkout."""
     if not path:
         return None
     p = os.path.realpath(os.path.join(root, path))
+    wt = worktree_of(root, p)
+    if wt:
+        p = os.path.join(git_at(os.path.realpath(root))[0], os.path.relpath(p, wt))
     if not p.startswith(os.path.realpath(root) + os.sep):
         return None
     r = os.path.relpath(p, root).replace(os.sep, "/")
@@ -692,9 +725,9 @@ def blocking_lease(st, path, sid, who):
 
 def describe_lease(st, key, l):
     w = st["work"].get(l.get("wid") or "")
-    return "%s is held by %s (agent %s, %s %s%s)" % (
+    return "%s is held by %s (agent %s, %s %s%s%s)" % (
         key, sname(st, l["sid"]), l["agent"], "claimed" if l.get("until") else "last edit",
-        ago(l["ts"]), ", work %s %s" % (w["id"], w["title"]) if w else "")
+        ago(l["ts"]), ", in worktree " + l["wt"] if l.get("wt") else "", ", work %s %s" % (w["id"], w["title"]) if w else "")
 
 
 class Conflict(Exception):
@@ -969,20 +1002,20 @@ def apply(st, ev):
             w["title"], w["updated"] = title, ts
 
     elif kind == "file":
-        s["files"][ev["path"]] = {"hash": ev["hash"], "ts": ts, "agent": who}
+        s["files"][ev["path"]] = dict({"hash": ev["hash"], "ts": ts, "agent": who}, **({"wt": ev["wt"]} if ev.get("wt") else {}))
         w = work_item(st, wid)
         if w:
             w["files"][ev["path"]] = {"hash": ev["hash"], "ts": ts, "sid": sid, "agent": who}
             w["updated"] = ts
         old = st.setdefault("leases", {}).get(ev["path"])
         if not (old and old.get("until") and (old["sid"], old["agent"]) == (sid, who)):
-            st["leases"][ev["path"]] = {"sid": sid, "agent": who, "ts": ts, "until": None, "wid": wid}
+            st["leases"][ev["path"]] = {"sid": sid, "agent": who, "ts": ts, "until": None, "wid": wid, "wt": ev.get("wt")}
     elif kind == "claim":  # explicit (`claim`, has a ttl) or implicit (taken just before an edit)
         for path in ev.get("paths", []):
             old = st.setdefault("leases", {}).get(path)
             if ev.get("implicit") and old and old.get("until") and (old["sid"], old["agent"]) == (sid, who):
                 continue
-            st["leases"][path] = {"sid": sid, "agent": who, "ts": ts, "wid": wid,
+            st["leases"][path] = {"sid": sid, "agent": who, "ts": ts, "wid": wid, "wt": (ev.get("wt") or {}).get(path),
                                   "until": None if ev.get("implicit") else ts + ev.get("ttl", LEASE_SECS)}
     elif kind == "release":
         paths = ev.get("paths") or []
@@ -2104,7 +2137,8 @@ def handle_hook(inp):
     if event == "PreToolUse" and inp.get("tool_name") in EDIT_TOOLS:
         mode = os.environ.get("DOCKET_LEASES", "block")
         ti = inp.get("tool_input") or {}
-        p = rel(root, ti.get("file_path") or ti.get("notebook_path"))
+        fp = ti.get("file_path") or ti.get("notebook_path")
+        p = rel(root, fp)
         st = load_state(root) if p else None
         wid = p and st["sessions"].get(sid, {}).get("work")
         rmode = os.environ.get("DOCKET_REVIEW", "block")
@@ -2129,7 +2163,7 @@ def handle_hook(inp):
                     mine and (mine["sid"], mine["agent"]) == (sid, who) and lease_active(st, mine)):
                 try:  # take it now, under the lock, so two first edits can't both pass
                     emit(root, _guard=lease_guard([p], sid, who), kind="claim", paths=[p], implicit=True,
-                         title="Editing " + p, **E)
+                         title="Editing " + p, wt={p: worktree_of(root, fp)}, **E)
                 except Busy:
                     pass  # docket trouble never blocks real work
                 except Conflict:
@@ -2164,9 +2198,10 @@ def handle_hook(inp):
     elif event == "PostToolUse":
         tool, ti = inp.get("tool_name"), inp.get("tool_input") or {}
         if tool in EDIT_TOOLS:
-            p = rel(root, ti.get("file_path") or ti.get("notebook_path"))
+            fp = ti.get("file_path") or ti.get("notebook_path")
+            p = rel(root, fp)
             if p:
-                emit(root, kind="file", title="Edited " + p, path=p, hash=file_hash(root, p),
+                emit(root, kind="file", title="Edited " + p, path=p, hash=file_hash(root, fp), wt=worktree_of(root, fp),
                      tool=tool, **E)
         elif tool == "TodoWrite":
             tasks = [{"id": str(i + 1), "subject": clip(t.get("content"), 200),
@@ -3741,14 +3776,12 @@ def worktree_owner(root, st, path):
     """The session that ran `git worktree add` for it; else the one holding or editing files under it."""
     if st.get("worktrees", {}).get(path):
         return st["worktrees"][path]
-    r = rel(root, path)
-    if r:
-        for k, l in st.get("leases", {}).items():
-            if k.startswith(r + "/"):
-                return l["sid"]
-        for x in sorted(st["sessions"].values(), key=lambda x: -x["last"]):
-            if any(p.startswith(r + "/") for p in x["files"]):
-                return x["id"]
+    for l in st.get("leases", {}).values():
+        if l.get("wt") == path:
+            return l["sid"]
+    for x in sorted(st["sessions"].values(), key=lambda x: -x["last"]):
+        if any(f.get("wt") == path for f in x["files"].values()):
+            return x["id"]
     return None
 
 
@@ -3796,8 +3829,24 @@ def note_push(root, sid, who, resp, cwd):
             dst, new[:7], clip("; ".join(subj[:3]), 300) or "?", more, sname(load_state(root), sid)))
 
 
+def merge_conflicts(repo, branches, dflt):
+    """{(a, b): files} for branch pairs (dflt with each, then pairwise) whose merge would conflict, by git merge-tree.
+    Branches already in dflt are skipped. Git older than 2.38 (no --write-tree) predicts nothing."""
+    bs = [b for b in branches if b != dflt and not (dflt and git(repo, "merge-base", "--is-ancestor", b, dflt, timeout=10).returncode == 0)]
+    bs = bs[:8]  # ponytail: pairwise is O(n^2) merge-trees; 8 branches = 36, raise the cap if they stay fast
+    out = {}
+    for a, b in [(dflt, b) for b in bs if dflt] + [(a, b) for i, a in enumerate(bs) for b in bs[i + 1:]]:
+        r = git(repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", a, b, timeout=30)
+        if r.returncode == 1:
+            out[(a, b)] = sorted(set(x for x in r.stdout.decode(errors="replace").splitlines()[1:] if x))
+        elif r.returncode:
+            break  # old git, or a branch that vanished: no prediction rather than a wrong one
+    return out
+
+
 def worktree_nudge(root, sid, st):
-    """Upkeep, at most hourly per session: worktrees this session made that are merged, pushed and clean."""
+    """Upkeep, at most hourly per session: worktrees this session made that are merged, pushed and clean, and its
+    live branches that would conflict with the default branch or another live session's branch (told once each)."""
     f = os.path.join(bdir(root), "tidy", re.sub(r"[^\w-]", "_", sid) + ".wt")
     try:
         if now() - os.path.getmtime(f) < 3600:
@@ -3806,10 +3855,32 @@ def worktree_nudge(root, sid, st):
         pass
     os.makedirs(os.path.dirname(f), exist_ok=True)
     open(f, "w").close()
-    mine = [w for w in git_worktrees(root) if worktree_owner(root, st, w["path"]) == sid]
+    wts = git_worktrees(root)
+    own = {w["path"]: worktree_owner(root, st, w["path"]) for w in wts}
+    mine = [w for w in wts if own[w["path"]] == sid]
     dflt = default_branch(root) if mine else None
-    return "\n".join("Your worktree %s is merged and pushed: git worktree remove %s" % (w["path"], shlex.quote(w["path"]))
-                     for w in mine if worktree_state(root, w, dflt)["prunable"]) or None
+    out = ["Your worktree %s is merged and pushed: git worktree remove %s" % (w["path"], shlex.quote(w["path"]))
+           for w in mine if worktree_state(root, w, dflt)["prunable"]]
+    br = {w["branch"].replace("refs/heads/", ""): own[w["path"]] for w in wts
+          if isinstance(w.get("branch"), str) and is_live(st["sessions"].get(own[w["path"]]))}
+    if sid in br.values():
+        f += "c"  # the pairs already told, so each conflict is said once
+        try:
+            seen = set(open(f).read().splitlines())
+        except OSError:
+            seen = set()
+        for (a, b), files in merge_conflicts(root, list(br), dflt).items():
+            if br.get(a) != sid:
+                a, b = b, a
+            key = "%s %s %s" % (a, b, ",".join(files))
+            if br.get(a) != sid or key in seen:
+                continue
+            seen.add(key)
+            out.append("Your branch %s and %s both change %s (merge conflict predicted): coordinate before merging." % (
+                a, "%s's branch %s" % (sname(st, br[b]), b) if b in br else b, ", ".join(files[:6]) or "the same files"))
+        with open(f, "w") as fh:
+            fh.write("\n".join(sorted(seen)))
+    return "\n".join(out) or None
 
 
 def needs_user(st):
@@ -4788,14 +4859,18 @@ def main():
         return 0
     if a.cmd == "worktrees":
         wts, dflt = git_worktrees(root), default_branch(root)
+        cfs = merge_conflicts(root, [w["branch"].replace("refs/heads/", "") for w in wts if isinstance(w.get("branch"), str)], dflt)
         for w in wts:
             worktree_state(root, w, dflt)
             o = worktree_owner(root, st, w["path"])
             kb = subprocess.run(["du", "-sk", w["path"]], capture_output=True, text=True).stdout.split("\t")[0]
-            print("%s%s\n    owner %s, branch %s, %s, %s, %s MB, %s%s" % (
+            b = str(w.get("branch")).replace("refs/heads/", "")
+            cf = ["%s (%s)" % (y if x == b else x, ", ".join(f[:3])) for (x, y), f in cfs.items() if b in (x, y)]
+            print("%s%s\n    owner %s, branch %s, %s, %s, %s MB, %s%s%s" % (
                 "PRUNABLE " if w["prunable"] else "", w["path"], sname(st, o) if o else "?",
                 w.get("branch", "(detached)").replace("refs/heads/", ""), w["merge"], "clean" if w["clean"] else "dirty",
-                int(kb) // 1024 if kb.isdigit() else "?", ago(now() - w["age"]), ", locked" if w.get("locked") else ""))
+                int(kb) // 1024 if kb.isdigit() else "?", ago(now() - w["age"]), ", locked" if w.get("locked") else "",
+                "\n    conflicts with " + "; ".join(cf) if cf else ""))
         print("Remove a prunable one with: git worktree remove <path>" if any(w["prunable"] for w in wts) else
               "" if wts else "No linked worktrees.")
         return 0
@@ -5403,7 +5478,7 @@ def main():
             emit(root, sid=sid, agent=a.agent, kind="note", title="Took over " + ", ".join(paths),
                  body=clip(a.reason, 500), **({"wid": wid} if wid else {}))
         emit(root, _guard=None if a.steal else lease_guard(paths, sid, a.agent), sid=sid, agent=a.agent,
-             kind="claim", paths=paths, ttl=a.ttl * 60, **({"wid": wid} if wid else {}))
+             kind="claim", paths=paths, ttl=a.ttl * 60, wt={norm_claim(root, p): worktree_of(root, p) for p in a.paths}, **({"wid": wid} if wid else {}))
         print("claimed %s for %d min (release with: release)" % (", ".join(paths), a.ttl))
         return 0
     if a.cmd in ("adopt", "resolve", "drop", "reopen", "pass"):
