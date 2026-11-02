@@ -11,6 +11,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from smoke_test import FAILS, check, hook, run  # noqa: E402
@@ -105,6 +106,22 @@ def _main(d):
     docket.rebuild = real_rebuild
     check("a lagging state catches up from its offset, same result",
           tail["offset"] == fresh["offset"] and tail["sessions"]["size1"]["entries"][-1]["title"] == "After the stale save")
+    old = json.loads(stale)  # written by a long-running process still on older code: no version stamp
+    old.pop("v")
+    open(sp, "w").write(json.dumps(old))
+    with open(os.path.join(d, ".docket", "events.jsonl"), "ab") as f:  # a big log: pad with events nothing reads
+        f.write(b"".join(b'{"kind": "metric", "title": "pad", "vals": {}, "sid": "x", "ts": 1, "id": "p%08d"}\n' % i
+                         for i in range(60000)))
+    ctx = hook(d, "UserPromptSubmit", "size2", prompt="go on")
+    check("a hook that would need the whole log replayed returns at once", not ctx, ctx[:200])
+    pid = os.path.join(d, ".docket", "rebuild.pid")
+    for _ in range(300):
+        if not os.path.exists(pid):
+            break
+        time.sleep(0.1)
+    check("and the replay runs behind it, once, and repairs the state",
+          not os.path.exists(pid) and json.load(open(sp)).get("v") == docket.STATE_V)
+    check("so the next hook works again", "<docket" in hook(d, "UserPromptSubmit", "size2", prompt="go on"))
     asks = docket.open_asks(fresh, "size2")
     check("open asks still found", any(m["title"] == "Please check the cache" for m in asks), repr(asks)[:300])
 

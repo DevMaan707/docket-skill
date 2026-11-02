@@ -1229,7 +1229,35 @@ def load_state(root):
                     return replay(st, f)
     except (OSError, ValueError):
         pass
+    try:
+        big = os.path.getsize(os.path.join(bdir(root), "events.jsonl")) > 4 << 20  # ~1 s to replay on a busy machine
+    except OSError:
+        big = False
+    if QUICK and big:  # a hook or status line: Claude Code kills it at its timeout, before a long replay could be saved
+        rebuild_behind(root)
+        raise SystemExit(0)
     return rebuild(root, write=False)
+
+
+QUICK = False  # set for hooks and the status line
+
+
+def rebuild_behind(root):
+    """Replay the whole log in a detached process (once at a time); the caller says nothing this time."""
+    p = os.path.join(bdir(root), "rebuild.pid")
+    try:
+        if now() - os.path.getmtime(p) < 300:
+            return
+    except OSError:
+        pass
+    try:
+        with open(p, "w") as f:
+            f.write(str(os.getpid()))
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "rebuild"], cwd=root, start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env=dict(os.environ, DOCKET_ROOT=root, DOCKET_REBUILD_PID=p))
+    except OSError:
+        pass
 
 
 def replay(st, f):
@@ -5020,6 +5048,9 @@ def main():
                                                   and re.fullmatch(r"(--[\w-]+ \S+ ?)+", arg) else [arg])]
     a = ap.parse_args(global_flags(sub, argv))
 
+    if a.cmd in ("hook", "statusline"):
+        global QUICK
+        QUICK = True
     if a.cmd == "hook":
         try:
             raw = sys.stdin.read()
@@ -5076,7 +5107,7 @@ def main():
     root = find_root()
     ensure_board(root)
     viewer = os.path.join(bdir(root), "index.html")
-    st = load_state(root)
+    st = load_state(root) if a.cmd != "rebuild" else None  # rebuild reads the log itself
 
     if a.cmd in ("init", "path", "open"):
         save_state(root, st, view=True)
@@ -5131,6 +5162,11 @@ def main():
         return 0
     if a.cmd == "rebuild":
         st = rebuild(root)
+        if os.environ.get("DOCKET_REBUILD_PID"):
+            try:
+                os.remove(os.environ["DOCKET_REBUILD_PID"])
+            except OSError:
+                pass
         print("rebuilt: %d sessions, %d work items" % (len(st["sessions"]), len(st["work"])))
         return 0
     if a.cmd == "search":
@@ -5674,9 +5710,11 @@ def main():
         print("%s; told %d live session%s" % ("paused" if a.cmd == "pause" else "resumed", n_, "" if n_ == 1 else "s"))
         return 0
     if a.cmd == "rouse":  # ponytail: polls every 5 min; exits once the goal ends or no session can be woken for an hour
-        sent, quiet = {}, now()
+        sent, quiet, code = {}, now(), os.path.getmtime(os.path.abspath(__file__))
         while True:
             time.sleep(300)
+            if os.path.getmtime(os.path.abspath(__file__)) != code:  # docket was reinstalled: old code must not write state
+                os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
             st = load_state(root)
             g = st.get("goal")
             if not (g and g["status"] == "active" and g["autonomous"]):
