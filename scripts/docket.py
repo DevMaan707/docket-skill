@@ -1219,11 +1219,30 @@ def load_state(root):
     try:
         with open(os.path.join(bdir(root), "state.json"), encoding="utf-8") as f:
             st = json.load(f)
-        if st.get("offset") == os.path.getsize(os.path.join(bdir(root), "events.jsonl")) and st.get("v") == STATE_V:
+        size = os.path.getsize(os.path.join(bdir(root), "events.jsonl"))
+        if st.get("v") == STATE_V and st.get("offset") == size:
             return st
+        if st.get("v") == STATE_V and 0 < (st.get("offset") or 0) < size:  # behind: replay only the tail
+            with open(os.path.join(bdir(root), "events.jsonl"), "rb") as f:
+                f.seek(st["offset"] - 1)
+                if f.read(1) == b"\n":  # still the same log (a sync rewrite moves line starts)
+                    return replay(st, f)
     except (OSError, ValueError):
         pass
     return rebuild(root, write=False)
+
+
+def replay(st, f):
+    for line in f:
+        if not line.endswith(b"\n"):
+            break  # a writer is mid-append: read it next time
+        try:
+            apply(st, json.loads(line))
+        except (ValueError, KeyError):
+            pass
+        finally:
+            st["offset"] += len(line)  # apply() sees the event's own start offset
+    return st
 
 
 def save_state(root, st, view=False):
@@ -1283,13 +1302,7 @@ def rebuild(root, write=True):
     if os.path.exists(p):
         st["offset"] = 0
         with open(p, "rb") as f:
-            for line in f:
-                try:
-                    apply(st, json.loads(line))
-                except (ValueError, KeyError):
-                    pass
-                finally:
-                    st["offset"] += len(line)  # apply() sees the event's own start offset
+            replay(st, f)
     if write:
         write_index(root, st, list(st["work"]))
         save_state(root, st, view=True)
@@ -1372,7 +1385,7 @@ def emit(root, _guard=None, **ev):
         if gone or ev["kind"] in ("work_new", "work_move", "work_type", "work_rename", "work_status",
                                   "session_start"):  # also re-check trust against the repo on start
             write_index(root, st, list(st["work"]))  # structure changed: redo every page
-        elif wid and wid in st["work"] and ev["kind"] != "turn_end":
+        elif wid and wid in st["work"] and ev["kind"] not in ("turn_end", "prompt", "msg_read", "metric", "wait"):  # pages don't show these
             write_index(root, st, [wid] + ancestors(st, wid))
         save_state(root, st, view=ev["kind"] in ("turn_end", "session_end"))  # the viewer is current when a session idles
     return ev, st
@@ -3575,10 +3588,13 @@ def wake(st, ev, text=None):
             continue
         if text is None and batched(st, x["id"], [m]):
             continue  # status fyi to a hub: it waits for the digest
+        r = m and m.get("re") and find_msg(st, m["re"])
+        answer = bool(r and r.get("kind") == "ask" and r["sid"] in selves(st, x["id"]))
         line = text or ("[docket] %s from %s: %s\nRead it with `%s inbox --session %s` (it also arrives with your next "
-                        "tool call), then answer with `%s reply %s \"...\"`."
-                        % (MSG_KINDS.get(ev.get("msgKind"), "Message"), sname(st, ev["sid"]),
-                           clip(flag_suspicious(ev.get("title", "")), 160), cli(), x["id"], cli(), ev.get("id", "<id>")))
+                        "tool call)%s."
+                        % ("Answer to your ask" if answer else MSG_KINDS.get(ev.get("msgKind"), "Message"), sname(st, ev["sid"]),
+                           clip(flag_suspicious(ev.get("title", "")), 160), cli(), x["id"],
+                           "" if answer else ", then answer with `%s reply %s \"...\"`" % (cli(), ev.get("id", "<id>"))))
         try:
             c = socket.socket(socket.AF_UNIX)
             c.settimeout(2)
@@ -3801,14 +3817,17 @@ def metric_cond(st, expr):
 def open_asks(st, sid=None):
     """Asks nobody they went to has answered yet; with sid, only the ones addressed to that session."""
     msgs, out = st.get("msgs", []), []
+    repliers = {}
+    for r in msgs:
+        if r.get("re"):
+            repliers.setdefault(r["re"], set()).add(r["sid"])
     for m in msgs:
         if m.get("kind") != "ask":
             continue
-        answered = {r["sid"] for r in msgs if r["re"] == m["id"] and r["sid"] not in (m["sid"], "steward")}
-        if answered:
+        if repliers.get(m["id"], set()) - {m["sid"], "steward"}:
             continue
-        if any(i["status"] in ("done", "dropped") for w in m.get("wids", []) if w in st["work"]
-               for i in pending_items(st, w) if i["pid"] == "A-" + m["id"][:6]):
+        if any((st["work"].get(w, {}).get("pending", {}).get("A-" + m["id"][:6]) or {}).get("status") in ("done", "dropped")
+               for w in m.get("wids", [])):  # settled with resolve/drop on any item it went to
             continue
         if sid:
             me = selves(st, sid)
@@ -5018,10 +5037,20 @@ def main():
         root = find_root((inp_.get("workspace") or {}).get("current_dir") or inp_.get("cwd"))
         if not os.path.isdir(bdir(root)):
             return 0  # not a docket project: say nothing, create nothing
-        st = load_state(root)
         me = inp_.get("session_id") or ""
         if me:
             note_ctx(root, me, inp_)
+        key, cache = "", os.path.join(bdir(root), "ctx", "%s.sl" % re.sub(r"[^\w-]", "", me))
+        try:  # refreshes are frequent: reuse the line until the log changes or a minute passes (lock expiry)
+            key = "%d %d\n" % (os.path.getsize(os.path.join(bdir(root), "events.jsonl")), now() // 60)
+            with open(cache) as f:
+                old = f.read()
+            if old.startswith(key):
+                print(old[len(key):], end="")
+                return 0
+        except OSError:
+            pass
+        st = load_state(root)
         parts = []
         nu = len(needs_user(st))
         if nu:
@@ -5035,7 +5064,14 @@ def main():
             parts.append("held: " + ", ".join(mine[:3]))
         if st.get("paused"):
             parts.append("PAUSED")
-        print("docket: " + (" · ".join(parts) if parts else "all clear"))
+        line = "docket: " + (" · ".join(parts) if parts else "all clear") + "\n"
+        print(line, end="")
+        try:
+            os.makedirs(os.path.dirname(cache), exist_ok=True)
+            with open(cache, "w") as f:
+                f.write(key + line)
+        except OSError:
+            pass
         return 0
     root = find_root()
     ensure_board(root)

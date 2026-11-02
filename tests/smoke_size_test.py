@@ -14,6 +14,8 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from smoke_test import FAILS, check, hook, run  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+import docket  # noqa: E402
 
 
 def main():
@@ -92,6 +94,19 @@ def _main(d):
     board = ctx[ctx.find("<docket-board"):]
     check("pins about other work show by title only", "Pin 11" in board and "pinbody11" not in board, board[:600])
     check("older pins are counted, not dropped silently", "older pins" in board)
+
+    sp = os.path.join(d, ".docket", "state.json")  # a writer that saved state late: readers replay only the tail
+    stale = open(sp).read()
+    run(["log", "note", "After the stale save", "--session", "size1"], d)
+    fresh = docket.load_state(d)
+    open(sp, "w").write(stale)
+    real_rebuild, docket.rebuild = docket.rebuild, lambda *a, **k: FAILS.append("full rebuild on a lagging state")
+    tail = docket.load_state(d)
+    docket.rebuild = real_rebuild
+    check("a lagging state catches up from its offset, same result",
+          tail["offset"] == fresh["offset"] and tail["sessions"]["size1"]["entries"][-1]["title"] == "After the stale save")
+    asks = docket.open_asks(fresh, "size2")
+    check("open asks still found", any(m["title"] == "Please check the cache" for m in asks), repr(asks)[:300])
 
 
 if __name__ == "__main__":
