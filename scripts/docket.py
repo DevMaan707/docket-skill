@@ -99,6 +99,8 @@ constraints, and anything destructive, costly or irreversible.
 4. Plan from the aim: work items with acceptance checks (work new ... --done-when), split by
    deliverable and file ownership, riskiest first. Size the team to the work: one session for a
    small change, three to five for product work; three focused sessions beat five scattered ones.
+   Write the tasks in order (pending W-xxxx --add "<task>" --after <ids> --lane <lane>); sessions
+   claim them with `next`. Don't assign tasks by message.
 5. Brief every lane. A session sees only what you tell it, so each brief carries: the objective and
    the part of the aim it serves; inputs and decisions already locked; boundaries (files, what's
    out); what to hand back; done-when. Vague briefs cause duplicate work and gaps.
@@ -522,6 +524,8 @@ def pending_items(st, wid):
         if m.get("kind") == "ask" and wid in m.get("wids", []):
             raw.append({"pid": "A-" + m["id"][:6], "subject": "Asked by %s: %s" % (sname(st, m["sid"]), m["title"]),
                         "source": "message", "sid": m["sid"], "agent": m["agent"], "live": False, "ts": m["ts"]})
+    for p in w.get("planned", []):
+        raw.append(dict(p, source="planned", wid=wid, live=False))
     for c in w.get("criteria", []):  # done-when criteria: frozen, settled by resolve with evidence (or the metric)
         raw.append({"pid": c["pid"], "subject": "Done when: " + c["text"], "text": c["text"], "source": "criterion",
                     "sid": c["sid"], "agent": c["agent"], "wid": wid, "ts": c["ts"],
@@ -654,6 +658,31 @@ def find_pending(st, pid):
             if it["pid"] == pid or pid in [c["pid"] for c in it["copies"]]:
                 return wid, it
     return None, None
+
+
+def waits_on(st, it):
+    """The --after tasks of a planned task that aren't done or dropped yet."""
+    return [b for b in it.get("after", []) if (find_pending(st, b)[1] or {}).get("status", "done") not in ("done", "dropped")]
+
+
+def next_task(st, sid, lane=None):
+    """The planned task this session should claim next: open, nobody on it, every --after task finished, not
+    another live lane's. Its own lane's tasks first, then its work item's, then the rest; oldest first."""
+    mine = {_norm(lane)} if lane else {k for k, l in st.get("lanes", {}).items() if l["sid"] == sid}
+    held = {k for k, l in st.get("lanes", {}).items() if is_live(st["sessions"].get(l["sid"]))}
+    home, best = st["sessions"].get(sid, {}).get("work"), None
+    for w in st["work"].values():
+        if w["status"] != "open" or any(st["work"].get(b, {}).get("status") == "open" for b in w.get("blockedBy", [])):
+            continue
+        for it in pending_items(st, w["id"]):
+            tag = _norm(it.get("lane"))
+            if it["source"] != "planned" or it["status"] != "open" or (tag in held and tag not in mine) \
+                    or waits_on(st, it):
+                continue
+            rank = (0 if tag and tag in mine else 1 if w["id"] == home else 2, it["ts"], it["pid"])
+            if not best or rank < best[0]:
+                best = (rank, it)
+    return best and best[1]
 
 
 def drop_leases(st, pred):
@@ -958,6 +987,13 @@ def apply(st, ev):
         if w:
             cs = w.setdefault("criteria", [])
             cs.append({"pid": "AC%d" % (len(cs) + 1), "text": title, "sid": sid, "agent": who, "ts": ts})
+            w["updated"] = ts
+    elif kind == "pending_add":  # a task the lead wrote: claimed with `next` once its --after tasks are finished
+        w = work_item(st, ev["wid"])
+        if w:
+            w.setdefault("planned", []).append({"pid": "P-" + ev["id"][:6], "subject": title, "body": body, "sid": sid,
+                                                "agent": who, "ts": ts, "after": ev.get("after") or [],
+                                                "lane": ev.get("lane") or ""})
             w["updated"] = ts
     elif kind == "work_type":
         w = work_item(st, ev["wid"])
@@ -2684,12 +2720,14 @@ def keep_going(st, sid):
                 "lanes (%s lanes), reply on the thread with what you'll own and your doubts, agree, then take your lane "
                 "(%s lane take \"<area>\" -b \"<scope>\") and start. (Continuation %d of %d.)"
                 % (c, c, c, s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
-    return ("The user's standing goal is still open (autonomous mode), so don't stop to ask. Take the next step in "
+    nt = next_task(st, sid)
+    return ("The user's standing goal is still open (autonomous mode), so don't stop to ask. %sTake the next step in "
             "your lane: settle what %s audit lists, read the goal thread and your inbox, delegate independent pieces, "
             "verify on unseen inputs, commit and merge what's finished, and post progress on the thread. If you are only "
             "waiting on a job, say so (%s wait \"<what>\" --minutes N) and stop. If truly blocked, log a blocker and "
             "stop. If the goal is met: %s goal met -b \"<evidence>\". (Continuation %d of %d.)"
-            % (c, c, c, s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
+            % ("Next for you: %s %s; claim with %s next. " % (nt["pid"], clip(nt["subject"], 100), c) if nt else "",
+               c, c, c, s.get("continues", 0) + 1, GOAL_MAX_CONTINUES))
 
 
 IDLE_WAKE_SECS, REWAKE_SECS = 1200, 1800
@@ -2722,6 +2760,9 @@ def rouse_idle(root, st, sent):
         todo = ("carry on in your lane (%s): your brief's next step, then %s audit for tasks assigned to you" % (
             ", ".join(lane), c) if lane else "take work: %s ready, the REVIEW and NOT DONE tasks in %s audit, or ask the "
             "lead on the goal thread for a lane" % (c, c))
+        nt = next_task(st, x["id"])
+        if nt:
+            todo = "next for you: %s %s; claim with %s next" % (nt["pid"], clip(nt["subject"], 100), c)
         n = wake(st, {"sid": "rouser", "to": [x["id"]]}, "[docket] The user's standing goal is open and you've been idle "
                  "%d min. Don't wait to be asked: read your inbox (%s inbox --session %s), then %s. If you are waiting on "
                  "a job, say so with %s wait \"<what>\" --minutes N; if blocked, log a blocker." % (
@@ -4516,6 +4557,15 @@ def main():
     pe.add_argument("wid", nargs="?", help="defaults to this session's work item")
     pe.add_argument("--session", **sess)
     pe.add_argument("--all", action="store_true", help="include done/dropped")
+    pe.add_argument("--add", help="write a task on the item for a session to claim with `next`")
+    pe.add_argument("--after", default="", help="with --add: task ids it waits on (comma-separated)")
+    pe.add_argument("--lane", default="", help="with --add: the lane it belongs to")
+    pe.add_argument("-b", "--body", default="")
+    pe.add_argument("--agent", default=os.environ.get("DOCKET_AGENT", "main"))
+    nx = sub.add_parser("next", help="claim the next planned task that's ready for you")
+    nx.add_argument("--lane", help="prefer this lane's tasks over your own lane's")
+    nx.add_argument("--session", **sess)
+    nx.add_argument("--agent", default=os.environ.get("DOCKET_AGENT", "main"))
     for name, hlp in (("adopt", "take pending tasks into this session"),
                       ("resolve", "mark pending tasks as already done (--reason: the evidence)"),
                       ("reopen", "a task marked done that isn't (needs --reason: what's missing)"),
@@ -4831,15 +4881,16 @@ def main():
     if a.cmd in ("pending", "check") and not a.wid:
         a.wid = st["sessions"].get(a.session or "", {}).get("work") or sys.exit(
             "Which work item? Give a W-id (this session isn't filed under one).")
-    if a.cmd == "pending":
+    if a.cmd == "pending" and not a.add:
         wid = resolve_wid(st, a.wid) or sys.exit("No such work item: %s" % a.wid)
         items = [i for i in pending_items(st, wid) if a.all or i["status"] in ("open", "adopted", "active")]
         if not items:
             print("Nothing pending on %s." % wid)
         for i in items:
-            print("%-9s %-8s %s  (%s from %s%s)" % (
+            wo = i["status"] == "open" and waits_on(st, i)
+            print("%-9s %-8s %s  (%s from %s%s%s)" % (
                 i["pid"], i["status"], i["subject"], i["source"], sname(st, i["sid"]),
-                "; by " + sname(st, i["by"]) if i.get("by") else ""))
+                "; by " + sname(st, i["by"]) if i.get("by") else "", "; after " + ", ".join(wo) if wo else ""))
         if any(i["status"] == "open" for i in items):
             print("\nCheck each open item against the code, then: adopt <id> (still needed), "
                   "resolve <id> (already done), or drop <id> --reason \"...\" (not needed).")
@@ -5204,6 +5255,47 @@ def main():
         return 0
     if a.cmd == "queue":
         return queue_cmd(root, st, a, sid)
+    if a.cmd == "pending":  # --add
+        wid = resolve_wid(st, a.wid) or sys.exit("No such work item: %s" % a.wid)
+        after = []
+        for b in [x.strip() for x in a.after.split(",") if x.strip()]:
+            bw, bi = find_pending(st, b)
+            bi or sys.exit("No pending task %s (see: pending)." % b)
+            after.append("%s/%s" % (bw, bi["pid"]))
+        ev, st = emit(root, sid=sid, agent=a.agent, kind="pending_add", wid=wid, title=clip(a.add, 200),
+                      body=clip(a.body, 4000), after=after, lane=a.lane)
+        print("added P-%s on %s%s; a session claims it with: %s next" % (
+            ev["id"][:6], wid, " after " + ", ".join(after) if after else "", cli()))
+        return 0
+    if a.cmd == "next":
+        for _ in range(5):  # lost a race for the task: pick again against the fresh state
+            it = next_task(st, sid, a.lane)
+            if not it:
+                print("Nothing ready for you: no open planned task is free and unblocked (see: %s pending, %s audit)."
+                      % (cli(), cli()))
+                return 0
+
+            def guard(st_, lock, it=it):
+                if not lock.held:
+                    raise Busy("docket is busy (another writer holds the lock); retry.")
+                now_it = find_pending(st_, "%s/%s" % (it["wid"], it["pid"]))[1]
+                if not now_it or now_it["status"] != "open" or waits_on(st_, now_it):
+                    raise Conflict("%s was just taken" % it["pid"])
+            try:
+                _, st = emit(root, _guard=guard, sid=sid, agent=a.agent, kind="pending_set", wid=it["wid"],
+                             pid=it["pid"], title="adopted", body="claimed with next", subject=it["subject"])
+            except Busy:
+                raise
+            except Conflict:
+                st = load_state(root)
+                continue
+            if st["sessions"].get(sid, {}).get("work") != it["wid"]:
+                _, st = emit(root, sid=sid, kind="work_attach", wid=it["wid"], role="continue")
+            print("claimed %s on %s: %s%s\nAdd it to your task list. Finish with: %s resolve %s --reason \"<evidence>\" "
+                  "(or drop it with --reason); tasks waiting on it become claimable then." % (
+                      it["pid"], it["wid"], it["subject"], "\n  " + it["body"] if it.get("body") else "", cli(), it["pid"]))
+            return 0
+        sys.exit("Other sessions kept taking the next task first; run next again.")
     if a.cmd == "metric":
         vals = metric_vals(a.vals)
         prev = latest_metric(st, a.name)
