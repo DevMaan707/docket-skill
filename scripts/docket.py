@@ -108,7 +108,8 @@ constraints, and anything destructive, costly or irreversible.
    for its next turn and wakes nobody.
 7. Accept against the aim. "The lane says done" isn't done: run the acceptance checks, or have a
    reviewer from another lane run them. When reality changes the plan, log the decision and re-brief
-   the lanes it touches.
+   the lanes it touches. Status goes in the record (result/handoff/brief), not in messages; messages
+   are for questions, disagreements and findings: result <W-id> "..." --accepted|--killed, handoff.
 8. Decide inside the aim; take only the user's calls to the user (changes to the aim, audience,
    success measure or constraints; anything destructive, costly or irreversible), batched in one
    message, most important first, each with your recommendation."""
@@ -121,6 +122,8 @@ the aim below and the lead's brief for your lane.
 - Make implementation calls yourself and log them (decision --rejected). Ask the lead, not the
   user, when the brief is ambiguous in a way that changes the outcome: early, one concrete question.
 - Report through your brief (now / done / next / blocked); the lead reads briefs, not status mail.
+- Status goes in the record (result/handoff/brief), not in messages; messages are for questions,
+  disagreements and findings.
 - Don't reply just to acknowledge; the sender sees that you read it. Reply only with an answer, a
   disagreement, or a result.
 - Done means the acceptance checks pass with evidence you ran this turn; then hand it to review.
@@ -951,7 +954,7 @@ def apply(st, ev):
         w = work_item(st, ev["wid"])
         if w:
             w.setdefault("pending", {})[ev["pid"]] = {
-                "status": title, "by": sid, "reason": body, "ts": ts, "subject": ev.get("subject", "")}
+                "status": title, "by": ev.get("holder") or sid, "reason": body, "ts": ts, "subject": ev.get("subject", "")}
             w["updated"] = ts
     elif kind == "criterion":  # done-when criterion ACn: a pending task on the item until settled with evidence
         w = work_item(st, ev["wid"])
@@ -959,6 +962,12 @@ def apply(st, ev):
             cs = w.setdefault("criteria", [])
             cs.append({"pid": "AC%d" % (len(cs) + 1), "text": title, "sid": sid, "agent": who, "ts": ts})
             w["updated"] = ts
+    elif kind == "work_owner":  # handoff: the item's owner is now holder
+        w = work_item(st, ev["wid"])
+        if w:
+            w["owner"], w["updated"] = ev["holder"], ts
+            if ev["holder"] not in [x["sid"] for x in w["sessions"]]:
+                w["sessions"].append({"sid": ev["holder"], "role": "owner", "ts": ts})
     elif kind == "work_type":
         w = work_item(st, ev["wid"])
         if w:
@@ -2348,8 +2357,13 @@ def to_label(st, to):
 
 def mail_block(st, sid, flush=False):
     got, digest = mail_split(st, sid, flush)
+    chg = [m for m in got if m.get("kind") == "status"]  # result / handoff: one line, not a message to answer
+    line = chg and "<docket-changes>Changes since your last turn (in the record, no reply needed): %s</docket-changes>" % (
+        "; ".join(clip(flag_suspicious(m["title"]), 160) for m in chg[-10:]))
+    ids = [m["id"] for m in got + digest]
+    got = [m for m in got if m not in chg]
     if not got and not digest:
-        return None, []
+        return line or None, ids
     direct = [m for m in got if set(m["to"]) != {"board"}]
     posts = [m for m in got if set(m["to"]) == {"board"}]
     c = cli()
@@ -2381,7 +2395,7 @@ def mail_block(st, sid, flush=False):
     out += ['Reply: %s reply <id> "<text>" --session %s. Write: %s msg <session name|id|W-xxxx|all> '
             '"<text>" --session %s. Post a notice: %s post "<title>" -b "<text>" --session %s [--pin].'
             % (c, sid, c, sid, c, sid), "</docket-mail>"]
-    return "\n".join(out), [m["id"] for m in got + digest]
+    return "\n".join(([line] if line else []) + out), ids
 
 
 def size(n):
@@ -3047,8 +3061,10 @@ BARE_ACK = re.compile(r"(?i)\W*(ack(nowledged)?|noted|agreed|thanks?( you)?|got 
 
 def rouses(st, m):
     """Mail worth waking an idle session for: asks, findings, the user's and the steward's mail (answers,
-    escalations, defaults) and answers in an ask's thread. Plain fyi and bare acks wait for the next hook."""
+    escalations, defaults) and answers in an ask's thread. Plain fyi, bare acks and status changes wait for the next hook."""
     r = find_msg(st, m["re"]) if m.get("re") else None
+    if m.get("kind") == "status":
+        return False
     return m["sid"] == "user" or not (BARE_ACK.fullmatch(m["title"]) and not m["body"]) and (
         m.get("kind") in ("ask", "finding") or m["sid"] == "steward" or bool(r and r.get("kind") == "ask"))
 
@@ -3072,6 +3088,65 @@ def seen_text(st, sid, secs=3600):
         rows.append("[%s] %d/%d%s" % (m["id"], len(r), len(a), " (%s)" % ", ".join(sorted(sname(st, x) for x in r))
                                       if 0 < len(r) <= 3 else ""))
     return "Seen by (your messages of the last hour): " + "; ".join(rows) if rows else None
+
+
+# ponytail: keyword heuristic; tune the list if real status mail slips past or findings get tipped
+STATUS_MSG = re.compile(r"(?i)\b(accepted|killed|merged|done|owner|assigned|handed (?:off|over)|shipped|landed|closed)\b")
+
+
+def settler(st, sid, wid, it=None):
+    """May sid accept, kill or hand off wid (or its pending task it)? The item's owner, the task's holder or
+    writer, the lead, or the user. Anyone may record a plain result."""
+    w = st["work"][wid]
+    own = {w["owner"]} if w.get("owner") else {w.get("createdBy")} | {x["sid"] for x in w["sessions"] if x["role"] == "owner"}
+    own |= {it.get("by"), it.get("sid")} if it else set()
+    return sid == "user" or bool(selves(st, sid) & (own | {lead_of(st)}))
+
+
+def status_cmd(root, st, a, sid):
+    """result / handoff: a typed status change in the record instead of a status message. The item's
+    sessions, a new owner and the lead get it as one line with their next hook, never as a wake."""
+    wid, it = resolve_wid(st, a.ref), None
+    if not wid:
+        wid, it = find_pending(st, a.ref)
+        it or sys.exit("No work item or pending task %s (see: pending)." % a.ref)
+    ref, w = it["pid"] if it else wid, st["work"][wid]
+    verdict = "handed off" if a.cmd == "handoff" else "accepted" if a.accepted else "killed" if a.killed else ""
+    if verdict and not settler(st, sid, wid, it):
+        sys.exit("Refused: only %s's owner (%s), the lead (%s) or the user may mark it %s. Send your result to them "
+                 "instead: %s msg %s \"...\" --kind finding" % (
+                     ref, sname(st, w.get("owner") or w.get("createdBy")), sname(st, lead_of(st)) if lead_of(st) else
+                     "none", verdict, cli(), (w.get("owner") or w.get("createdBy") or wid)[:8]))
+    guard, new = expect_guard(wid, a.expect, sid), None
+    if a.cmd == "handoff":
+        new = recipients(st, sid, [a.to])[0]
+        new in st["sessions"] or sys.exit("Hand off to a session (see: who).")
+        if it:
+            emit(root, _guard=guard, sid=sid, agent=a.agent, kind="pending_set", wid=wid, pid=it["pid"], title="adopted",
+                 holder=new, body="handed off", subject=it["subject"])
+        else:
+            emit(root, _guard=guard, sid=sid, agent=a.agent, kind="work_owner", wid=wid, holder=new,
+                 title="Handed %s to %s" % (wid, sname(st, new)))
+        line = "%s handed off to %s by %s" % (ref, sname(st, new), sname(st, sid))
+    else:
+        out = clip(a.outcome, 300)
+        if it:
+            emit(root, _guard=guard, sid=sid, agent=a.agent, kind="pending_set", wid=wid, pid=it["pid"],
+                 title="dropped" if a.killed else "done", body=(verdict + ": " if verdict else "") + out, subject=it["subject"])
+        else:
+            _, st = emit(root, _guard=guard, sid=sid, agent=a.agent, kind="decision" if verdict else "note", wid=wid,
+                         title="%s %s: %s" % (wid, verdict or "result", out), **({"verdict": verdict} if verdict else {}))
+            why = done_blockers(st, wid) if a.accepted else []
+            if a.killed or a.accepted and not why:
+                emit(root, sid=sid, agent=a.agent, kind="work_status", wid=wid, title="abandoned" if a.killed else "done")
+            for x in why:
+                print("  still open (%s): %s" % (wid, x))
+        line = "%s %s by %s: %s" % (ref, verdict or "result", sname(st, sid), out)
+    to = [x for x in dict.fromkeys([wid, new, lead_of(st)]) if x and x not in selves(st, sid)]
+    if to:
+        emit(root, sid=sid, agent=a.agent, kind="msg", msgKind="status", to=to, title=clip(line, 200), body="")
+    print("recorded: %s%s" % (line, "\n  reaches %s with their next hook (no wake, no reply needed)" % to_label(st, to) if to else ""))
+    return 0
 
 
 def mail_split(st, sid, flush=False):
@@ -4571,6 +4646,17 @@ def main():
     ms.add_argument("--default", help="to the user: what you'll do if they don't answer in time (never for destructive "
                                       "or production actions)")
     ms.add_argument("--decide-after", help="with --default: how long the user has, e.g. 90m or 4h (default %gh)" % DEFAULT_AFTER_HOURS)
+    rs_ = sub.add_parser("result", help="record a work item's or task's outcome (--accepted/--killed: owner or lead); no message needed")
+    rs_.add_argument("ref", help="W-xxxx or a pending task id")
+    rs_.add_argument("outcome")
+    vx_ = rs_.add_mutually_exclusive_group()
+    vx_.add_argument("--accepted", action="store_true", help="accepted: closes a work item (if its bar is met) or the task")
+    vx_.add_argument("--killed", action="store_true", help="killed: abandons the work item or drops the task")
+    rs_.add_argument("--expect", help="rev you last read; refuse if others changed the item since")
+    ho_ = sub.add_parser("handoff", help="hand a work item or task to another session (owner or lead); no message needed")
+    ho_.add_argument("ref", help="W-xxxx or a pending task id")
+    ho_.add_argument("to", help="session name or id")
+    ho_.add_argument("--expect", help="rev you last read; refuse if others changed the item since")
     po = sub.add_parser("post", help="post a notice to the project board every session sees")
     po.add_argument("title")
     po.add_argument("--pin", action="store_true", help="show it to every new session until unpinned")
@@ -4580,6 +4666,7 @@ def main():
     rp.add_argument("title")
     for p_ in (ms, po, rp):
         p_.add_argument("-b", "--body", default="")
+    for p_ in (ms, po, rp, rs_, ho_):
         p_.add_argument("--session", **sess)
         p_.add_argument("--agent", **agent_)
     un_ = sub.add_parser("unread", help="mark messages unread for a session so its hooks deliver them again")
@@ -4897,8 +4984,10 @@ def main():
         return 1 if bad else 0
 
     sid = getattr(a, "session", None) or latest_session(st) or "manual"
-    if a.cmd in ("msg", "post", "reply") and not getattr(a, "session", None) and "CLAUDECODE" not in os.environ:
+    if a.cmd in ("msg", "post", "reply", "result", "handoff") and not getattr(a, "session", None) and "CLAUDECODE" not in os.environ:
         sid = "user"  # typed in a terminal (or copied from the viewer): it's the user talking
+    if a.cmd in ("result", "handoff"):
+        return status_cmd(root, st, a, sid)
     if a.cmd in ("msg", "post", "reply"):
         re_, pin = None, a.cmd == "post" and (a.pin or a.keep)
         if a.cmd == "reply":
@@ -4965,6 +5054,13 @@ def main():
             if t in st["sessions"] and batched(st, t, st["msgs"][-1:]):
                 print("  %s gets status in a %d-min digest; for status, update your brief instead (%s log brief ...)"
                       % (sname(st, t), DIGEST_SECS // 60, cli()))
+        txt = "%s %s" % (a.title, body or "")
+        if ev["msgKind"] == "fyi" and not set(ev["to"]) & {"board", "user"} and "?" not in txt and len(txt) < 300 \
+                and (STATUS_MSG.search(txt) or BARE_ACK.fullmatch(a.title) and not body):
+            print("  tip: this reads as status, which every recipient pays a turn to read. Status goes in the record, not "
+                  "in messages: %s result <W-id|task> \"<outcome>\" [--accepted|--killed], %s handoff <W-id|task> <session>, "
+                  "or your brief (log brief --now --done). Messages are for questions, disagreements and findings."
+                  % (cli(), cli()))
         return 0
     if a.cmd == "listen":
         return listen(root, sid, max(0.01, a.hours))
