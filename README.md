@@ -265,8 +265,8 @@ builds on it still looks like it succeeded. Docket treats its own record as susp
 ```
 .docket/
   events.jsonl     append-only log; the only source of truth
-  state.json       derived state (docket.py rebuild regenerates it)
-  data.js          the state, for the viewer
+  state.json       derived state (docket.py rebuild regenerates it); long bodies are clipped, show reads them from the log
+  data.js          the state, for the viewer (rewritten at most once a minute, when a session idles, and on open)
   index.html       the journal; open it in any browser
   work/INDEX.md    the work index
   work/W-0001.md   one page per work item

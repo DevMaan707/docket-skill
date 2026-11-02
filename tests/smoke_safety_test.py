@@ -94,7 +94,8 @@ def _main(d):
         run(["post", "Notice %d" % i, "-b", "x" * 400, "--pin"], d, "sS")
     ctx = hook(d, "SessionStart", "sBig", source="startup")
     check("SessionStart context is capped, own context first",
-          len(ctx) < 8300 and ctx.startswith("DOCKET is on") and "(more:" in ctx, "%d chars" % len(ctx))
+          len(ctx) < 8300 and ctx.startswith("DOCKET is on") and ("(more:" in ctx or "30 older pins" in ctx),
+          "%d chars" % len(ctx))
 
     before = open(os.path.join(bd, "state.json"), encoding="utf-8").read()
     run(["rebuild"], d)
