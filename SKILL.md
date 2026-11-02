@@ -151,8 +151,9 @@ stops. While someone else holds it, your edit is **denied** with who holds it an
 - Editing through Bash (sed, scripts) bypasses the edit hook: `claim` those files first.
 - Your own subagents may edit files your main agent edited. Two running subagents may not edit
   the same file, and main may not edit a file a running subagent holds.
-- Leases span git worktrees: `src/x.py` in any worktree of the repo is the same file, so a worktree doesn't
-  get you around a holder; branches predicted to conflict on merge are told to both owners.
+- Leases span git worktrees: `src/x.py` in any worktree of the repo is the same file. In the same checkout a
+  held file is denied; on another branch you're warned (agree who changes what), and branches predicted to
+  conflict on merge are told to both owners.
 
 **The record.** Every work item has a **rev**, the id of the last event that changed it. `show`
 prints it and every `log` prints the new one. Pass the rev you read with `--expect` on updates

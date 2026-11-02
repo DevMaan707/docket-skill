@@ -4,6 +4,7 @@ lease; branches that would conflict on merge are told to both owners, once. Stdl
 
     python3 tests/smoke_wtlease_test.py
 """
+import json
 import os
 import shutil
 import subprocess
@@ -63,11 +64,14 @@ def _main(d):
 
     check("first edit in worktree a is allowed", pre_edit(p, "sA", os.path.join(a, "src", "x.py")).get("permissionDecision") != "deny")
     out = pre_edit(p, "sB", os.path.join(b, "src", "x.py"))
-    check("the same file in worktree b (outside the project) collides, naming worktree a",
-          out.get("permissionDecision") == "deny" and "src/x.py is held by session sA" in out.get("permissionDecisionReason", "")
-          and "in worktree " + a in out.get("permissionDecisionReason", ""), repr(out))
+    why = json.dumps(out)
+    check("the same file in worktree b (another branch) warns, naming session sA and worktree a",
+          out.get("permissionDecision") != "deny" and "src/x.py is held by session sA" in why
+          and "in worktree " + a in why and "another branch" in why, why)
     out = pre_edit(p, "sC", os.path.join(p, "src", "x.py"))
-    check("and in the main checkout", out.get("permissionDecision") == "deny", repr(out))
+    check("and in the main checkout (also another branch)", out.get("permissionDecision") != "deny" and "another branch" in json.dumps(out), repr(out))
+    out = pre_edit(p, "sC", os.path.join(a, "src", "x.py"))
+    check("the same file in the same worktree is denied", out.get("permissionDecision") == "deny", repr(out))
     check("a different file in worktree b is free", pre_edit(p, "sB", os.path.join(b, "src", "y.py")).get("permissionDecision") != "deny")
     code, out = run(["claim", os.path.join(b, "src", "y.py")], p, "sB")
     check("a worktree outside the project can be claimed", code == 0 and "claimed src/y.py" in out, out)

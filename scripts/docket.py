@@ -2211,7 +2211,11 @@ def handle_hook(inp):
                        "abandoned, take it over explicitly: %s claim %s --steal --reason \"...\" "
                        "--session %s --agent %s" % (describe_lease(st, key, l), cli(), l.get("wid") or "W-xxxx",
                                                     cli(), p, sid, who))
-                if mode == "warn":
+                if (l.get("wt") or None) != worktree_of(root, fp):  # another branch: overlap is a merge risk, not a clash
+                    why = ("%s, on another branch. You may go on in yours, but you'll both change this file: agree who "
+                           "changes what (%s msg %s ...), and docket warns you both if the merge would conflict."
+                           % (describe_lease(st, key, l), cli(), sname(st, l["sid"])))
+                if mode == "warn" or "on another branch" in why:
                     hook_output(event, "<docket-warning>%s</docket-warning>" % why)
                 else:
                     print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
