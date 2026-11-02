@@ -104,6 +104,8 @@ constraints, and anything destructive, costly or irreversible.
    out); what to hand back; done-when. Vague briefs cause duplicate work and gaps.
 6. Steer, don't relay. Read briefs (who), queues and digests; don't ask for status pings and don't
    paste records around: point to ids. Don't take lane work yourself; unblock, decide, re-plan.
+   To get an idle session moving, send it an ask (msg <name> "..." --kind ask): an fyi waits
+   for its next turn and wakes nobody.
 7. Accept against the aim. "The lane says done" isn't done: run the acceptance checks, or have a
    reviewer from another lane run them. When reality changes the plan, log the decision and re-brief
    the lanes it touches.
