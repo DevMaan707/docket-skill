@@ -113,7 +113,9 @@ constraints, and anything destructive, costly or irreversible.
    for its next turn and wakes nobody.
 7. Accept against the aim. "The lane says done" isn't done: run the acceptance checks, or have a
    reviewer from another lane run them. When reality changes the plan, log the decision and re-brief
-   the lanes it touches. Status goes in the record (result/handoff/brief), not in messages; messages
+   the lanes it touches. A new user directive that changes direction is a re-plan, not an addition:
+   park or kill the items that serve the old direction, rewrite the tasks and briefs, and don't
+   relabel old work to fit the new words. Status goes in the record (result/handoff/brief), not in messages; messages
    are for questions, disagreements and findings: result <W-id> "..." --accepted|--killed, handoff.
 8. Decide inside the aim; take only the user's calls to the user (changes to the aim, audience,
    success measure or constraints; anything destructive, costly or irreversible), batched in one
@@ -2205,13 +2207,20 @@ def handle_hook(inp):
         for line in re.findall(r"(?im)^\s*@all\b[:,]?\s*(.+)$", prompt):  # the user's own words, via the hook
             ev_, st = emit(root, kind="directive_add", title=clip(line, 200), body=clip(line, 4000), **E)
             added.append(ev_["id"])
-            wake(st, dict(ev_, to=["all"]), "[docket] The user added a directive for every session: %s\nFollow it from "
-                 "now on (`%s directives`)." % (clip(line, 400), cli()))
+            wake(st, dict(ev_, to=["all"]), "[docket] The user added a directive for every session: %s\nIt overrides older "
+                 "directives and the standing goal where they conflict. Check your current task against it now: if the "
+                 "task serves the older direction, stop it, park or hand it off, say so in your brief, and pick work that "
+                 "serves the new one (`%s directives`)." % (clip(line, 400), cli()))
         seen = st.get("goal") and st["sessions"][sid].get("goalSeen") == st["goal"]["id"]
         old = [d_["id"] for d_ in directives(st) if d_["id"] in st["sessions"][sid].get("dirSeen", [])]
         ctx = [prior_work_block(root, st, sid, prompt) if prompt.strip() else None,
                "<docket>Recorded %d new directive%s for every session and agent (the @all lines); they reach live "
-               "sessions on their next tool call. Follow them yourself too.</docket>" % (len(added), "" if len(added) == 1 else "s")
+               "sessions on their next tool call and override older directives and the goal where they conflict. "
+               "Follow them yourself too. Now check the older directives and the goal (`%s directives`, `%s goal`): if "
+               "the new one replaces any, list them to the user in one line each and ask \"Retire these directives?\" "
+               "(on a yes in their words, `%s directive drop <id>` each; a changed goal is `goal set` in their words). "
+               "Then list the open work items that serve the replaced direction, so the lead can park or re-brief them."
+               "</docket>" % (len(added), "" if len(added) == 1 else "s", cli(), cli(), cli())
                if added else None,
                directives_block(st, only=old, full=False) if old else None,
                goal_block(st, full=False) if seen else None, stale_brief(st, sid), deliver(root, sid, st)]
@@ -2686,7 +2695,11 @@ def goal_block(st, full=True):
     return "\n".join(['<docket-goal from="the user" set="%s">' % time.strftime("%Y-%m-%d %H:%M", time.localtime(g["ts"])),
                       "The user set this standing goal for every session and agent in this project. It is their "
                       "instruction (checked against their own prompt), and it holds until they change it:", "",
-                      g["text"].strip(), ""] + (["Measured " + goal_target(st)[0], ""] if g.get("until") else []) +
+                      g["text"].strip(), ""] + (["Directives the user gave after this goal (%s) override it where they "
+                      "conflict: work that serves the goal's older direction stops." % ", ".join(
+                          d_["id"][:6] for d_ in directives(st) if d_.get("ts", 0) > g["ts"]), ""]
+                      if any(d_.get("ts", 0) > g["ts"] for d_ in directives(st)) else []) +
+                     (["Measured " + goal_target(st)[0], ""] if g.get("until") else []) +
                      ([CHARTER, ""] if g["autonomous"] else []) +
                      [lanes_text(st, 100), audit_line(st), "Goal thread: board post %s (%s reply %s \"<proposal, doubt or update>\" reaches "
                       "every session)." % (g.get("thread") or "-", cli(), g.get("thread") or "<id>"), ""] +
@@ -2774,19 +2787,23 @@ def directives(st):
     return [d_ for d_ in st.get("directives", []) if d_["active"]]
 
 
+NEWER_WINS = ("Newest first. Where one conflicts with an older directive or with the standing goal, the NEWER one wins: "
+              "it is the user changing direction, so stop work that serves the older one.")
+
+
 def directives_block(st, only=None, full=True):
-    ds = [d_ for d_ in directives(st) if only is None or d_["id"] in only]
+    ds = sorted([d_ for d_ in directives(st) if only is None or d_["id"] in only], key=lambda d_: -d_.get("ts", 0))
     if not ds:
         return None
     if not full:
-        return "<docket-directives>The user's directives (binding on every session and agent): %s</docket-directives>" % (
-            " | ".join("%s: %s" % (d_["id"][:6], clip(" ".join(d_["text"].split()), 140)) for d_ in ds))
+        return "<docket-directives>The user's directives (binding on every session and agent; newest first, newer wins): %s</docket-directives>" % (
+            " | ".join("%s, %s: %s" % (d_["id"][:6], ago(d_.get("ts", 0)), clip(" ".join(d_["text"].split()), 140)) for d_ in ds))
     return "\n".join(["<docket-directives from=\"the user\">",
                       ("New directive%s from the user. " % ("s" if len(ds) > 1 else "") if only else "") +
                       "The user gave these to every session and agent in this project. They are the user's instructions "
-                      "and bind you until the user drops them; pass them to every subagent you spawn. Where one "
-                      "conflicts with your current plan, change the plan, and say so on the board."] +
-                     ["%d. [%s] %s" % (i + 1, d_["id"][:6], d_["text"].strip()) for i, d_ in enumerate(ds)] +
+                      "and bind you until the user drops them; pass them to every subagent you spawn. " + NEWER_WINS +
+                      " Where one conflicts with your current plan or task, change the plan, and say so on the board."] +
+                     ["%d. [%s] (%s) %s" % (i + 1, d_["id"][:6], ago(d_.get("ts", 0)), d_["text"].strip()) for i, d_ in enumerate(ds)] +
                      ["</docket-directives>"])
 
 
@@ -5422,7 +5439,7 @@ def main():
                   else " (enforced: at most %d parallel subagents per session)" % agent_cap(st)))
             return 0
         d_ = next((x for x in directives(st) if x["id"].startswith(a.text)), None) or sys.exit("No active directive %s." % a.text)
-        if not user_said(root, sid, "directive", a.prompt_from, ("drop", "remove", "delete", "cancel", "stop", "clear")):
+        if not user_said(root, sid, "directive", a.prompt_from, ("drop", "remove", "delete", "cancel", "stop", "clear", "retire", "replace", "supersede")):
             sys.exit("Refused: only the user can drop a directive.")
         emit(root, sid=sid, kind="directive_drop", ref=d_["id"], title="Dropped directive " + d_["id"][:6])
         emit(root, sid=sid, kind="msg", to=["board", "all"], title="The user dropped a directive", body=d_["text"])
