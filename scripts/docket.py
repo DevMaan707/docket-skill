@@ -4122,8 +4122,8 @@ def worktree_nudge(root, sid, st):
 
 
 NEEDS_CHECK, NEEDS_EXPIRE = 12 * 3600, 24 * 3600  # the author re-checks after 12 h; an orphan drops off after 24 h
-NEEDS_KEEP = re.compile(r"(?i)leak|secret|credential|password|token|\bdelet|destroy|\bprod\b|production|billing|payment|"
-                        r"\bcost|security|privacy|legal|irreversib")  # never expire on their own
+NEEDS_KEEP = re.compile(r"(?i)\bleak|secret|credential|password|\bdelet|destroy|irreversib|\bprod\b|production|"
+                        r"billing|payment")  # in the title: never expire on their own
 
 
 def needs_user(st, everything=False):
@@ -4137,14 +4137,14 @@ def needs_user(st, everything=False):
             out.append({"id": m["id"], "what": "%s from %s%s" % ("Question" if m.get("kind") == "ask" else "Note",
                                                                     sname(st, m["sid"]), default_note(m)), "title": m["title"],
                         "ts": m["ts"], "sid": m["sid"], "age": now() - max(m["ts"], m.get("stillTs", 0)),
-                        "keep": bool(NEEDS_KEEP.search(m["title"] + " " + (m.get("body") or "")))})
+                        "keep": bool(NEEDS_KEEP.search(m["title"]))})
     for x in st["sessions"].values():
         for e in x.get("entries", []):
             if e["kind"] == "blocker" and not e.get("resolved") and not e.get("supersededBy") and now() - e["ts"] < 7 * 86400:
                 out.append({"id": e["id"], "what": "Blocker%s from %s" % (" on " + e["wid"] if e.get("wid") else "",
                                                                          sname(st, x["id"])),
                             "title": e["title"], "ts": e["ts"], "sid": x["id"], "age": now() - max(e["ts"], e.get("stillTs", 0)),
-                            "keep": bool(NEEDS_KEEP.search(e["title"] + " " + (e.get("body") or "")))})
+                            "keep": bool(NEEDS_KEEP.search(e["title"]))})
     if not everything:
         out = [n for n in out if n["keep"] or n["age"] < NEEDS_EXPIRE or is_live(st["sessions"].get(n["sid"]))]
     return sorted(out, key=lambda x: (not x["keep"], x["ts"]))  # leaks, deletions and the like first
