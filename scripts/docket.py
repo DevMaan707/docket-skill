@@ -1145,10 +1145,15 @@ def apply(st, ev):
             if m["id"] == ev.get("ref"):
                 m["pin"] = kind == "pin"
                 m["keep"] = kind == "pin" and bool(ev.get("keep") or m.get("keep"))
-    elif kind == "withdraw":  # a note to the user that's already settled: off the needs list, kept in history
-        for m in st.get("msgs", []):
+    elif kind in ("withdraw", "still"):  # off the needs list (kept in history), or still needed: its age restarts
+        for m in st.get("msgs", []) + [e for x in st["sessions"].values() for e in x["entries"] if e["kind"] == "blocker"]:
             if m["id"] == ev.get("ref"):
-                m["withdrawn"] = ev.get("body") or True
+                if kind == "still":
+                    m["stillTs"] = ts
+                elif "to" in m:
+                    m["withdrawn"] = ev.get("body") or True
+                else:
+                    m["resolved"] = True
     elif kind in ("queue_add", "queue_take", "queue_done"):
         apply_queue(st, ev, sid, who, ts)
     if kind == "decision" and ev.get("defaultFor"):  # docket applied the asker's default: not the user's answer
@@ -2959,9 +2964,9 @@ def tidy_how():
     c = cli()
     return ("pin   superseded, done or old news -> %s unpin <id> [<id>...]; a standing rule -> pin <id> --keep\n"
             "needs already settled by a decision, reply or commit -> %s withdraw <id> --reason \"<what settled it>\" "
-            "(never one the user still has to answer)\n"
+            "; moot because the work moved on -> withdraw too; still needed -> %s still <id>\n"
             "item  finished -> %s work status <W> done; on hold -> work park <W> --reason; someone's -> msg them\n"
-            "brief lagging -> %s msg <session> \"your brief is stale: rewrite it\"" % (c, c, c, c))
+            "brief lagging -> %s msg <session> \"your brief is stale: rewrite it\"" % (c, c, c, c, c))
 
 
 def steward(root, st):
@@ -2986,7 +2991,7 @@ def steward(root, st):
                   due=now() + 3600, title="Tidy duty (your turn): %d stale things in the shared record" % len(rows),
                   body="Nobody owns these, so they rotate; this round is yours. Check each against the board, the "
                        "decisions and git, settle what's settled, leave what's still live, then reply with what you did "
-                       "(%s reply <id> \"...\"). Never withdraw a question the user hasn't been answered on.\n\n%s"
+                       "(%s reply <id> \"...\"). Withdraw a question to the user only when it's settled or moot, with the reason.\n\n%s"
                        % (cli(), "\n".join(rows)) + "\n\nHow:\n" + tidy_how())
     wake(st, ev)
     open(f, "w").close()
@@ -3537,7 +3542,8 @@ def tidy_nudge(root, sid, st=None):
             return None
     except OSError:
         pass
-    text = stale_brief(st or load_state(root), sid)
+    st = st or load_state(root)
+    text = "\n\n".join(t for t in (stale_brief(st, sid), own_stale_needs(st, sid)) if t) or None
     os.makedirs(os.path.dirname(f), exist_ok=True)
     open(f, "w").close()
     if not text:  # nothing due: look again in five minutes, not on every tool call
@@ -4115,21 +4121,45 @@ def worktree_nudge(root, sid, st):
     return "\n".join(out) or None
 
 
-def needs_user(st):
-    """What only the user can settle: questions and asks to the user, and open blockers."""
+NEEDS_CHECK, NEEDS_EXPIRE = 12 * 3600, 24 * 3600  # the author re-checks after 12 h; an orphan drops off after 24 h
+NEEDS_KEEP = re.compile(r"(?i)leak|secret|credential|password|token|\bdelet|destroy|\bprod\b|production|billing|payment|"
+                        r"\bcost|security|privacy|legal|irreversib")  # never expire on their own
+
+
+def needs_user(st, everything=False):
+    """What only the user can settle: questions and asks to the user, and open blockers. Without everything,
+    an item whose author is gone drops off after NEEDS_EXPIRE unless it's about a leak, deletion, cost or the like."""
     out = []
     msgs = st.get("msgs", [])
+    answered = {r["re"] for r in msgs if r["sid"] == "user" and r.get("re")}
     for m in msgs:
-        if "user" in m["to"] and not m.get("withdrawn") and not any(r["re"] == m["id"] and r["sid"] == "user" for r in msgs):
+        if "user" in m["to"] and not m.get("withdrawn") and m["id"] not in answered:
             out.append({"id": m["id"], "what": "%s from %s%s" % ("Question" if m.get("kind") == "ask" else "Note",
-                                                                    sname(st, m["sid"]), default_note(m)), "title": m["title"], "ts": m["ts"]})
+                                                                    sname(st, m["sid"]), default_note(m)), "title": m["title"],
+                        "ts": m["ts"], "sid": m["sid"], "age": now() - max(m["ts"], m.get("stillTs", 0)),
+                        "keep": bool(NEEDS_KEEP.search(m["title"] + " " + (m.get("body") or "")))})
     for x in st["sessions"].values():
         for e in x.get("entries", []):
             if e["kind"] == "blocker" and not e.get("resolved") and not e.get("supersededBy") and now() - e["ts"] < 7 * 86400:
                 out.append({"id": e["id"], "what": "Blocker%s from %s" % (" on " + e["wid"] if e.get("wid") else "",
                                                                          sname(st, x["id"])),
-                            "title": e["title"], "ts": e["ts"]})
-    return sorted(out, key=lambda x: x["ts"])
+                            "title": e["title"], "ts": e["ts"], "sid": x["id"], "age": now() - max(e["ts"], e.get("stillTs", 0)),
+                            "keep": bool(NEEDS_KEEP.search(e["title"] + " " + (e.get("body") or "")))})
+    if not everything:
+        out = [n for n in out if n["keep"] or n["age"] < NEEDS_EXPIRE or is_live(st["sessions"].get(n["sid"]))]
+    return sorted(out, key=lambda x: (not x["keep"], x["ts"]))  # leaks, deletions and the like first
+
+
+def own_stale_needs(st, sid):
+    """The author knows best whether its question to the user still matters: ask it, after NEEDS_CHECK."""
+    mine = [n for n in needs_user(st) if n["sid"] in selves(st, sid) and n["age"] > NEEDS_CHECK]
+    if not mine:
+        return None
+    return ("<docket>Your questions to the user have waited over %d h. Check each against what happened since (decisions, "
+            "directives, commits, replies): moot or settled -> %s withdraw <id> --reason \"<what settled it>\"; "
+            "still needed -> %s still <id> (and say why it matters in one line to the user):\n%s"
+            % (NEEDS_CHECK // 3600, cli(), cli(), "\n".join("- [%s] %s: %s" % (n["id"], ago(n["ts"]), clip(n["title"], 120))
+                                                       for n in mine[:6])) + "</docket>")
 
 
 def needs_block(st, sid):
@@ -4138,7 +4168,8 @@ def needs_block(st, sid):
     if not new:
         return None, []
     return ("<docket-needs-you>%d item%s waiting for the user across all sessions (full list: %s needs). Tell the user "
-            "about these in one short line each at the start of your reply:\n%s\nThe user answers with: %s answer <id> "
+            "about these in one short line each at the start of your reply, skipping any that are stale (settled by a later "
+            "decision, directive, commit or reply: withdraw those with a reason instead):\n%s\nThe user answers with: %s answer <id> "
             "\"...\"</docket-needs-you>" % (len(new), "" if len(new) == 1 else "s", cli(), "\n".join(
                 "- [%s] %s: %s" % (n["id"], n["what"], clip(flag_suspicious(n["title"]), 140)) for n in new[:8]), cli()),
             [n["id"] for n in new])
@@ -4929,10 +4960,13 @@ def main():
     pn.add_argument("ref", nargs="+")
     pn.add_argument("--keep", action="store_true")
     pn.add_argument("--session", **sess)
-    wd = sub.add_parser("withdraw", help="take notes to the user that are already settled off the needs list")
+    wd = sub.add_parser("withdraw", help="take notes or blockers for the user that are settled or moot off the needs list")
     wd.add_argument("ref", nargs="+")
     wd.add_argument("--reason", required=True, help="what settled it (a decision id, commit, or reply)")
     wd.add_argument("--session", **sess)
+    sl = sub.add_parser("still", help="a question to the user you raised is still needed (restarts its age)")
+    sl.add_argument("ref", nargs="+")
+    sl.add_argument("--session", **sess)
     sub.add_parser("tidy", help="what nobody owns and has gone stale: old pins, settled needs, idle items, lagging briefs")
     sub.add_parser("who", help="live sessions you can message")
     ld = sub.add_parser("lead", help="become the lead: product owner who interviews the user, writes the aim, plans and briefs lanes")
@@ -5004,7 +5038,8 @@ def main():
     rt_ = sub.add_parser("retro", help="what every session did over the last days, with numbers and 3 recommendations")
     rt_.add_argument("--days", type=float, default=7)
     rt_.add_argument("--session", **sess)
-    sub.add_parser("needs", help="what waits for the user: questions, asks and blockers from every session")
+    nd = sub.add_parser("needs", help="what waits for the user: questions, asks and blockers from every session")
+    nd.add_argument("--all", action="store_true", help="include old items whose author is gone")
     an_ = sub.add_parser("answer", help="the user answers a question from the needs list")
     an_.add_argument("ref")
     an_.add_argument("title")
@@ -5285,7 +5320,7 @@ def main():
         to = sorted(set(to), key=to.index)
         extra = {"msgKind": a.kind if a.cmd == "msg" else "fyi"}
         if a.cmd == "msg" and a.kind == "ask":  # owner's work items, so the ask is tracked
-            extra["wids"] = sorted({t if t.startswith("W-") else st["sessions"][t].get("work")
+            extra["wids"] = sorted({t if t.startswith("W-") else st["sessions"].get(t, {}).get("work")
                                     for t in to if t != "all"} - {None})
         mid = uuid.uuid4().hex[:10]
         if getattr(a, "attach", None):
@@ -5520,7 +5555,17 @@ def main():
         print("goal %s" % ("claimed met; every session and the board are told, for the user to confirm"
                            if a.action == "met" else "cleared; every session is told"))
         return 0
-    if a.cmd in ("pin", "unpin", "withdraw"):
+    if a.cmd in ("withdraw", "still"):
+        for r in a.ref:
+            n = next((n for n in needs_user(st, everything=True) if n["id"].startswith(r)), None)
+            if not n:
+                print("%s: not on the needs list" % r)
+                continue
+            emit(root, sid=sid, kind=a.cmd, ref=n["id"], body=getattr(a, "reason", None),
+                 title="%s %s" % ("Withdrew from the needs list" if a.cmd == "withdraw" else "Still needed:", n["id"]))
+            print("%s %s" % ("withdrew" if a.cmd == "withdraw" else "still needed, re-checked again in %d h:" % (NEEDS_CHECK // 3600), n["id"]))
+        return 0
+    if a.cmd in ("pin", "unpin"):
         for r in a.ref:
             m = find_msg(st, r)
             if not m:
@@ -5641,7 +5686,10 @@ def main():
     if a.cmd == "needs":
         if apply_defaults(root):
             st = load_state(root)
-        rows = needs_user(st)
+        rows = needs_user(st, everything=a.all)
+        hidden = len(needs_user(st, everything=True)) - len(rows)
+        if hidden:
+            print("(%d older items whose author is gone are hidden: needs --all)" % hidden)
         for n in rows:
             print("[%s] %s, %s: %s" % (n["id"], n["what"], ago(n["ts"]), n["title"]))
         print("Answer with: %s answer <id> \"...\"" % cli() if rows else "Nothing waits for you.")

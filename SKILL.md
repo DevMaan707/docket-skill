@@ -47,6 +47,13 @@ not a soloist:
   questions in one place (`needs`, the journal, the status line, a desktop notification). Their
   `answer` comes back to you as mail and wakes you. Only stop when nothing else can move without the
   answer.
+- **Your questions to the user are yours to keep current.** After 12h docket asks you to re-check
+  each one you raised: settled or moot → `withdraw <id> --reason "<what settled it>"`; still needed →
+  `still <id>`. When your session is gone, an item drops off `needs` after 24h (`needs --all` shows
+  it), except ones about leaks, deletion, production, cost or security, which wait for the user.
+- **Check staleness before acting or relaying.** A task, ask or needs item may already be settled by a
+  later decision, directive, commit or reply. Check before you adopt, do or pass it on; if it's stale,
+  `drop`/`withdraw` it with the reason instead.
 - **When you ask the user something with an obvious fallback, add `--default "<what you'll do>"`**
   (`--decide-after 4h` is the default deadline). If they haven't answered by then, docket logs a
   decision in your name ("Proceeding on default ..."), tells you to proceed, and keeps the question in
@@ -229,7 +236,7 @@ docket board                                           # pinned notices and rece
   day, live sessions whose brief lags their work. Every few hours the steward hands that list to
   one live session as a tracked "Tidy duty" ask (it rotates). When it's yours, check each line:
   `unpin <id>...` superseded pins, `withdraw <id> --reason "<decision/commit>"` notes the user no
-  longer needs to answer (never one still waiting on them), close or park dead items, message
+  longer needs to answer (settled, or moot because the work moved on), close or park dead items, message
   sessions with stale briefs. Then reply to the ask with what you did.
   A rule that holds for good (a user directive, a standing constraint) is `post ... --pin --keep` (or
   `pin <id> --keep`): shown as RULE and never listed as stale; don't unpin it to clear tidy.

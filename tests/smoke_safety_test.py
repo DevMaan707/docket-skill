@@ -146,7 +146,7 @@ def _main(d):
     check("withdraw takes a settled note off the needs list",
           code == 0 and not any(n["id"] == note["id"] for n in docket.needs_user(docket.load_state(d))), out)
     code, out = run(["withdraw", "nosuchid", "--reason", "x"], d, session="sS")
-    check("withdraw names ids it can't find", "no message" in out, out)
+    check("withdraw names ids it can't find", "not on the needs list" in out, out)
     st = docket.load_state(d)
     for m in st["msgs"]:
         m["ts"] = day
