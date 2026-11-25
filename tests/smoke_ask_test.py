@@ -56,6 +56,8 @@ def _main(d):
     check("instruction-like text in the record is flagged as data", "[flagged:" in ctx, ctx)
     check("context says what waits for the user and who is live", "Waiting for the user" in ctx
           and "Live sessions" in ctx, ctx[-600:])
+    check("context carries today's date and the latest entries, for 'today' and 'lately' questions",
+          ctx.startswith("Now: ") and "Latest entries" in ctx and "Cache layer half done" in ctx, ctx[:300])
     _, ctx = run(["ask", "what about %s?" % eid[:10], "--context"], proj)
     check("an entry id named in the question is included", eid in ctx, ctx[:400])
 

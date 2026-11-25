@@ -1849,16 +1849,21 @@ def ask_context(st, question, budget=ASK_BUDGET):
 
     named = [resolve_wid(st, w) for w in re.findall(r"\bW-\d{3,5}\b", question)]
     entries = [find_entry(st, x) for x in re.findall(r"\b[0-9a-f]{8,12}\b", question)]
-    wids = list(dict.fromkeys([w for w in named if w] + [h["wid"] for h in search(st, question, limit=4)]))
     live = sorted([x for x in st["sessions"].values() if is_live(x)], key=lambda x: -x["last"])
-    if not wids:  # nothing matched: what the live sessions are on
-        wids = list(dict.fromkeys(x["work"] for x in live if x.get("work") in st["work"]))[:4]
+    wids = list(dict.fromkeys([w for w in named if w] + [h["wid"] for h in search(st, question, limit=4)]
+                              + [x["work"] for x in live if x.get("work") in st["work"]]))[:6]
     seen = set()
     for e in [e for e in entries if e] + search_entries(st, question, limit=10):
         if e["id"] not in seen:
             seen.add(e["id"])
             parts.append("## Entry\n" + clip(entry_text(st, e), 1800))
-    parts[0:0] = [work_part(w) for w in wids]
+    parts[0:0] = ["Now: " + time.strftime("%Y-%m-%d %H:%M %Z (%A)")] + [work_part(w) for w in wids]
+    latest = sorted((e for _, e in all_entries(st) if e["kind"] not in ("output", "status", "prompt")),
+                    key=lambda e: -e["ts"])[:15]
+    parts.append("## Latest entries, newest first\n" + "\n".join(
+        "- %s %s on %s by %s, %s: %s" % (e["id"], e["kind"], e.get("wid") or "-", flag_suspicious(sname(st, e["sid"])),
+                                         time.strftime("%Y-%m-%d %H:%M", time.localtime(e["ts"])),
+                                         flag_suspicious(clip(e["title"], 160))) for e in latest))
     parts.append("## Live sessions\n" + ("\n".join(
         "- %s (%s) on %s, %s, active %s%s" % (flag_suspicious(x["name"] or "-"), x["id"][:8], x.get("work") or "no work item",
                                              x["status"], ago(x["last"]),
