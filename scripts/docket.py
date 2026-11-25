@@ -1894,7 +1894,7 @@ def ask(st, question, model):
         p = subprocess.run([exe, "-p", "--model", model, "--tools", "", "--strict-mcp-config", "--setting-sources", "",
                             "--no-session-persistence", "--output-format", "text", "--system-prompt", ASK_SYSTEM],
                            input="<record>\n%s\n</record>\n\nQuestion: %s" % (  # record text can't close the record
-                               ask_context(st, question).replace("</record", "<\\/record"), question),
+                               re.sub(r"</\s*record", r"<\\/record", ask_context(st, question), flags=re.I), question),
                            capture_output=True, text=True, timeout=180, cwd=tempfile.gettempdir(), env=env)
     except subprocess.TimeoutExpired:
         sys.exit("docket ask: no answer within 180 s.")
