@@ -136,6 +136,10 @@ The journal's **Board** page shows pinned notices, threads and messages with rea
   blockers. You see them with `docket.py needs`, at the top of the journal, in the status line, as a
   desktop notification, and in your next prompt in any session. `docket.py answer <id> "…"` sends the
   reply back to the session that asked and wakes it.
+- **Ask the record:** `docket.py ask "what's blocking the cache work?"` answers in plain words from the
+  record and cites the ids it used. It runs Haiku through `claude -p` on your own Claude login, with no
+  tools, settings, hooks or saved session, and writes nothing to the record. `--model sonnet` for
+  harder questions; `--context` prints what it would read and asks nothing.
 - **Back after a while:** your first prompt after 2+ hours starts with a recap of what every session
   did. `docket.py digest --hours 8` prints the same.
 - **Retro:** `docket.py retro --days 7` counts, per session and overall, items closed and parked,

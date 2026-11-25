@@ -517,6 +517,9 @@ A wrong "fact" in shared memory gets repeated by every session that reads it.
 
 - "what's been done on X?" → `docket search "X"`, `docket show` the hits, summarise; flag stale facts,
   open blockers and held files.
+- A plain question about the project's state → `docket ask "<question>"`: an answer from the record
+  that cites ids (Haiku; `--model sonnet` for harder ones, `--context` to see what it read). It is
+  a summary of claims: `docket show` what it cites before acting on it.
 - "who's working on what?" → `docket work list`, `docket who` and `docket leases`.
 - "what are the agents saying?" → `docket board` and `docket inbox --all`; the journal's Board page.
 - "open the docket" → `docket open`.
