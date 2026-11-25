@@ -1835,7 +1835,7 @@ def ask_context(st, question, budget=ASK_BUDGET):
         L = ["%s  %s  [%s, %s, updated %s]" % (wid, flag_suspicious(breadcrumb(st, wid)), w.get("type", "feature"),
                                               w["status"], ago(w.get("updated") or w["created"]))]
         if briefs:
-            L.append("Latest brief " + briefs[0]["id"] + " (" + prov(st, briefs[0]) + "): " + flag_suspicious(
+            L.append("Latest brief " + briefs[0]["id"] + " (" + flag_suspicious(prov(st, briefs[0])) + "): " + flag_suspicious(
                 briefs[0]["title"]))
             L += ["  %s: %s" % (k, flag_suspicious(clip(str(briefs[0][k]), 600)))
                   for k in ("now", "done", "next", "blocked") if briefs[0].get(k)]
@@ -1893,7 +1893,8 @@ def ask(st, question, model):
     try:
         p = subprocess.run([exe, "-p", "--model", model, "--tools", "", "--strict-mcp-config", "--setting-sources", "",
                             "--no-session-persistence", "--output-format", "text", "--system-prompt", ASK_SYSTEM],
-                           input="<record>\n%s\n</record>\n\nQuestion: %s" % (ask_context(st, question), question),
+                           input="<record>\n%s\n</record>\n\nQuestion: %s" % (  # record text can't close the record
+                               ask_context(st, question).replace("</record", "<\\/record"), question),
                            capture_output=True, text=True, timeout=180, cwd=tempfile.gettempdir(), env=env)
     except subprocess.TimeoutExpired:
         sys.exit("docket ask: no answer within 180 s.")
